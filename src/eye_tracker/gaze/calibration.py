@@ -1090,6 +1090,9 @@ def evaluate(
     if uncovered:
         log.warning("Calibration has no points on monitor(s) %s", uncovered)
 
+    # The size gate of panes and windows uses the usual pose's error: shifted
+    # poses are rarer, and the head-range pause and dwell absorb them.
+    usual = poses == 0 if np.any(poses == 0) else np.ones(poses.shape, dtype=bool)
     report = CalibrationReport(
         monitor_accuracy=float(np.mean(correct)),
         mean_error_px=float(np.mean(finite)) if finite.size else math.nan,
@@ -1101,7 +1104,7 @@ def evaluate(
         grade=grade,
         degree=selection.degree,
         uncovered_monitors=[int(i) for i in uncovered],
-        per_monitor_error_px=per_axis_errors(preds, Y, truth.tolist()),
+        per_monitor_error_px=per_axis_errors(preds[usual], Y[usual], truth[usual].tolist()),
         per_pose_error_px=per_pose,
         unseen_pose_error_px=unseen,
     )

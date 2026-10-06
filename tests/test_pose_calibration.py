@@ -91,6 +91,25 @@ def test_evaluate_reports_the_error_per_pose() -> None:
     assert all(math.isfinite(v) and v > 0 for v in report.per_pose_error_px.values())
 
 
+def test_the_size_gate_error_comes_from_the_usual_pose() -> None:
+    rng = np.random.default_rng(6)
+    base = calibration_samples(TWO, rng, 1.0, per_point=15)
+    # a head position the model cannot follow must not widen the gate; the tiny
+    # weight keeps the fit itself as it was without it
+    noisy = []
+    for t in make_plan(TWO, 5, first_id=POSE_ID_STRIDE):
+        feats = synth_features(np.tile((t.x, t.y), (15, 1)), rng, 8.0, head_offset=(6.0, 0, 0))
+        noisy += [
+            CalibrationSample(f, t.x, t.y, t.monitor_index, t.point_id, weight=1e-4) for f in feats
+        ]
+    _, alone = evaluate(base, TWO, nonlinear=GAZE_FEATURES)
+    _, both = evaluate([*base, *noisy], TWO, nonlinear=GAZE_FEATURES)
+    for monitor, (x, y) in both.per_monitor_error_px.items():
+        ax, ay = alone.per_monitor_error_px[monitor]
+        assert x < 1.5 * ax
+        assert y < 1.5 * ay
+
+
 def test_evaluate_without_poses_reports_pose_zero_only() -> None:
     samples = calibration_samples(TWO, np.random.default_rng(3), 1.0, per_point=15)
     _, report = evaluate(samples, TWO, nonlinear=GAZE_FEATURES)
