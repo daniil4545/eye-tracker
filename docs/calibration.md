@@ -1,7 +1,8 @@
 # Calibration guide
 
 Calibration teaches Eye Tracker how *your* head and eyes move when you look at each of *your*
-monitors. It takes about 15 seconds per monitor and you normally do it once per desk setup.
+monitors. It takes about 15 seconds per monitor for the dots, plus a moving dot of about 40 seconds per
+monitor, and you normally do it once per desk setup.
 
 ## Before you start
 
@@ -30,7 +31,8 @@ eye-tracker calibrate
 3. The ring shrinks while your eyes settle, then fills while samples are collected. The next dot
    follows automatically; the dots walk across each monitor in turn. **Space** pauses and resumes
    the dots, **R** starts over.
-4. At the end you get a grade and the accuracy per monitor. Press **Enter** to save, **R** to retry.
+4. After the dots, a dot moves over each monitor in turn. See [the moving dot](#the-moving-dot).
+5. At the end you get a grade and the accuracy per monitor. Press **Enter** to save, **R** to retry.
 
 If *"Can't see your face — check the camera"* appears, the dots pause until your face is visible
 again: check the camera direction and the lighting. After 60 seconds without a face the calibration
@@ -38,6 +40,26 @@ closes. A dot that gets too few usable samples (*"Keep looking at the dot…"*) 
 then skipped. While the window waits for a key (the instructions, the result, or paused with
 **Space**), it closes after 2 minutes without one. Walk-away detection is off while the calibration
 is open, which is why it never stays open unattended.
+
+## The moving dot
+
+After the dots, a dot moves over each monitor along a smooth looping path (a Lissajous figure)
+for 40 seconds per monitor. Follow it with your eyes. **You may move your head** while you do:
+lean a little, turn, sit higher or lower, the way you do in a day's work. Press **Esc** to cancel
+as with the dots.
+
+It helps because the dots are all taken with the head in one posture. The moving dot gives the model
+many frames with the head in different places, so the gaze estimate holds up better when you shift
+in your chair. This matters most for [window focus](windows.md), which needs a more exact estimate
+than switching between monitors.
+
+How it works: the eyes trail a moving target, so each frame is labelled with where the dot was
+0.1 s earlier, and the first 0.5 s of each path is not used. The moving-dot frames are many, so
+together they are weighted to count as much as the dots. The gaze error that [window and pane
+focus](windows.md) use is measured on the dots only.
+
+One measurement, one session, with head movement: the mean error was 357 px with the earlier
+calibration and 288 px with the dots plus the moving dot. That is a single run, not a promise.
 
 ## Understanding the grade
 
@@ -54,7 +76,8 @@ the model has not memorised.
 
 The same held-out predictions also give the gaze error on each monitor, across and down separately:
 the distance, in pixels, that three out of four gaze estimates stay within. Only the experimental
-[split-pane focus](panes.md) uses it, to decide which panes are large enough to be told apart.
+[split-pane focus](panes.md) and [window focus](windows.md) use it, to decide which panes and
+windows are large enough to be told apart.
 
 ## It keeps getting better
 
