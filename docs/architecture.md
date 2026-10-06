@@ -75,6 +75,15 @@ flowchart LR
    left, warps the cursor to the target monitor and gives keyboard focus to the last window used
    there. No synthetic clicks are ever sent.
 
+8. **Window step (macOS, experimental).** After the switch decision, `controller.py` runs a second
+   decider whose "panes" are the visible parts of the windows on the monitor the cursor is on
+   (`panes/windows.py`, window list from `platform/macos.py`). It runs only when the monitor decider
+   is content, when the head is inside the calibrated range (`windows.pause_off_range`, from the
+   model's extrapolation of the head features) and when a calibration exists. A window that
+   passes the size gate and the dwell gets the keyboard focus and comes forward alone, not all
+   windows of its app; the cursor does not move. Pane focus then works inside that window.
+   See [window focus](windows.md).
+
 ## The switching rules
 
 A switch fires only when all of these hold:
@@ -170,6 +179,13 @@ The face backend is created, used and closed on the worker thread. Worker setter
 unusable frames. A dot with too few samples is retried once and then skipped. The result is graded
 by leave-one-point-out cross-validation: each dot is predicted by a model that never saw it.
 
+After the dots, a moving-dot stage follows (`PURSUIT_S`, 40 s per monitor). The dot moves along a
+Lissajous path inside the dots' margins while the user follows it with the eyes and may move the
+head. Each frame is labelled with the dot's position `PURSUIT_LAG_S` (0.1 s) earlier, the first
+0.5 s of a path is skipped, and the path is cut into 2 s segments that cross-validation hides one
+at a time. `balance_pursuit_weights` gives the moving-dot samples together the weight of the dots.
+The gaze error that the size gate uses comes from the dots only.
+
 The calibration window (`ui/calibration_window.py`) pauses the dots while no face has been seen for
 1.5 s. Walk-away detection and the shoulder guard are suspended while it is open, so it closes
 itself after 60 s without a face, or after 2 minutes without a key press while it waits for one.
@@ -201,7 +217,8 @@ src/eye_tracker/
   vision/             camera, motion gate, worker thread, face backends and models
   gaze/               gaze model, filters, calibration, calibration store, implicit learning
   engine/             decision, reading rule, presence, guard, scheduler, input tracking, controller
-  panes/              split-pane focus (experimental): providers, worker thread, decision
+  panes/              split-pane focus (experimental): providers, worker thread, decision;
+                      windows.py turns the window list into panes for window focus (macOS)
   platform/           Windows / macOS / Linux integration, autostart, global hotkeys
   ui/                 tray, settings, calibration window, overlays, wizard
   app.py, cli.py      application wiring and command line
