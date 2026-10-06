@@ -85,6 +85,21 @@ of 120 px that is 300 px. Supported terminals and the full rules: [split-pane fo
 | `panes.windows_terminal` | `true` |  | Follow Windows Terminal panes (Windows only, through UI Automation). |
 | `panes.desktop_apps` | `false` |  | Also follow sessions side by side in the Claude desktop app (two chats) and the ChatGPT desktop app, which hosts Codex (main conversation and side chat), on Windows only: the session you look at gets the keyboard focus in its message box. Reads the app's accessibility tree, which makes the app build that tree; this may cost the app some CPU and memory while it is on. |
 
+## Window focus (experimental)
+
+| Key | Default | Allowed | Description |
+|---|---|---|---|
+| `windows.enabled` | `false` |  | Experimental (macOS): on the monitor you are already on, the window you look at gets the keyboard focus and is raised. Only windows large enough for your calibration's accuracy take part, and only while your head is near where you calibrated. |
+| `windows.dwell_ms` | `500` | 100 – 5000 | How long you must look at another window before it gets focus. |
+| `windows.typing_grace_ms` | `3000` | 0 – 20000 | No window switching for this long after you type, or after you switched windows yourself. |
+| `windows.reading_grace_ms` | `8000` | 0 – 60000 | After you typed while looking at another window (e.g. reading it), switching to that window waits this long after your last keystroke instead of the typing grace. 0 turns this off. |
+| `windows.cooldown_ms` | `1000` | 0 – 10000 | Minimum time between two window switches. |
+| `windows.after_monitor_switch_ms` | `1500` | 0 – 10000 | No window switching for this long after the cursor moved to another monitor. |
+| `windows.precision` | `2.5` | 1 – 6 | A window takes part only if its visible part is at least this many times your gaze error (measured by the calibration) wide, for windows side by side, or tall, for stacked windows. Higher is safer, lower allows smaller windows. |
+| `windows.hysteresis` | `0.5` | 0 – 3 | How far past the border between two windows the gaze must be, as a fraction of your gaze error. |
+| `windows.min_window_px` | `240` | 0 – 4000 | Windows whose visible part is narrower (or lower) than this many pixels never take part. |
+| `windows.pause_off_range` | `0.25` | 0 – 2 | Window switching pauses while your head is farther than this from the range you calibrated in (the larger of the roll, side, up/down and distance offsets, as a fraction of that range). 0 turns the pause off. |
+
 ## Walk-away (presence)
 
 The countdown is part of the away time: with the defaults it appears after 35 s without you, and the

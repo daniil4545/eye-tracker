@@ -507,6 +507,7 @@ def test_tray_menu_layout(controller: FakeController, cleanup: list[Any]) -> Non
         "Calibrate…",
         "Show gaze dot",
         "Follow split panes",
+        "Follow windows",
         "Camera preview…",
         "Settings…",
         "Start at login",
@@ -517,7 +518,13 @@ def test_tray_menu_layout(controller: FakeController, cleanup: list[Any]) -> Non
     # macOS must not move "About"/"Quit"/"Settings" into an application menu.
     assert all(a.menuRole() == a.MenuRole.NoRole for a in actions)
     checkable = {_label(a) for a in actions if a.isCheckable()}
-    assert checkable == {"Privacy mode", "Show gaze dot", "Follow split panes", "Start at login"}
+    assert checkable == {
+        "Privacy mode",
+        "Show gaze dot",
+        "Follow split panes",
+        "Follow windows",
+        "Start at login",
+    }
 
 
 def test_tray_pause_text_follows_the_paused_flag(
@@ -702,6 +709,23 @@ def test_tray_follow_split_panes_toggles_the_setting(
     changed.panes.enabled = True
     tray.set_settings(changed)
     assert tray.action_panes.isChecked()
+
+
+def test_tray_follow_windows_toggles_the_setting(
+    controller: FakeController, cleanup: list[Any]
+) -> None:
+    tray = _tray(controller, cleanup)
+    assert not tray.action_windows.isChecked()  # experimental: off by default
+    assert "Experimental" in tray.action_windows.toolTip()
+    tray.action_windows.trigger()
+    assert controller.settings.windows.enabled is True
+    assert controller.settings.panes.enabled is False
+    tray.action_windows.trigger()
+    assert controller.settings.windows.enabled is False
+    changed = controller.settings.copy()
+    changed.windows.enabled = True
+    tray.set_settings(changed)
+    assert tray.action_windows.isChecked()
 
 
 def test_tray_survives_failing_controller(cleanup: list[Any]) -> None:

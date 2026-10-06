@@ -282,3 +282,39 @@ def test_split_pane_values_are_validated_like_the_others() -> None:
     assert settings.panes.tmux is False
     # Files written before the section existed get the defaults.
     assert Settings.from_dict({"switching": {"enabled": False}}).panes == Settings().panes
+
+
+def test_window_focus_off_by_default() -> None:
+    windows = Settings().windows
+    assert windows.enabled is False
+    assert (windows.dwell_ms, windows.precision, windows.hysteresis) == (500, 2.5, 0.5)
+    assert (windows.min_window_px, windows.pause_off_range) == (240, 0.25)
+    doc = next(row["doc"] for row in describe_settings() if row["key"] == "windows.enabled")
+    assert doc.startswith("Experimental")
+    assert Settings.from_dict({"panes": {"enabled": True}}).windows == windows  # old files
+
+
+def test_window_values_validated() -> None:
+    settings = Settings.from_dict(
+        {"windows": {"enabled": "yes", "precision": 99, "dwell_ms": 10, "pause_off_range": -1}}
+    )
+    assert settings.windows.enabled is False
+    assert settings.windows.precision == 6.0
+    assert settings.windows.dwell_ms == 100
+    assert settings.windows.pause_off_range == 0.0
+
+
+def test_window_config_maps_settings() -> None:
+    from eye_tracker.panes.windows import window_pane_config
+
+    settings = Settings()
+    settings.windows.dwell_ms = 700
+    settings.windows.typing_grace_ms = 2000
+    settings.windows.precision = 2.0
+    settings.windows.min_window_px = 300
+    settings.switching.mouse_grace_ms = 900
+    cfg = window_pane_config(settings.windows, settings.switching)
+    assert cfg.dwell_s == 0.7
+    assert cfg.typing_grace_s == cfg.manual_grace_s == 2.0
+    assert cfg.mouse_grace_s == 0.9
+    assert (cfg.precision, cfg.hysteresis, cfg.min_pane_px) == (2.0, 0.5, 300.0)

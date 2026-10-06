@@ -239,6 +239,72 @@ class PaneSettings:
 
 
 @dataclass
+class WindowSettings:
+    enabled: bool = _opt(
+        False,
+        doc="Experimental (macOS): on the monitor you are already on, the window you look at "
+        "gets the keyboard focus and is raised. Only windows large enough for your "
+        "calibration's accuracy take part, and only while your head is near where you "
+        "calibrated.",
+    )
+    dwell_ms: int = _opt(
+        500, lo=100, hi=5000, doc="How long you must look at another window before it gets focus."
+    )
+    typing_grace_ms: int = _opt(
+        3000,
+        lo=0,
+        hi=20000,
+        doc="No window switching for this long after you type, or after you switched windows "
+        "yourself.",
+    )
+    reading_grace_ms: int = _opt(
+        8000,
+        lo=0,
+        hi=60000,
+        doc="After you typed while looking at another window (e.g. reading it), switching to "
+        "that window waits this long after your last keystroke instead of the typing grace. "
+        "0 turns this off.",
+    )
+    cooldown_ms: int = _opt(1000, lo=0, hi=10000, doc="Minimum time between two window switches.")
+    after_monitor_switch_ms: int = _opt(
+        1500,
+        lo=0,
+        hi=10000,
+        doc="No window switching for this long after the cursor moved to another monitor.",
+    )
+    precision: float = _opt(
+        2.5,
+        lo=1.0,
+        hi=6.0,
+        doc="A window takes part only if its visible part is at least this many times your "
+        "gaze error (measured by the calibration) wide, for windows side by side, or tall, "
+        "for stacked windows. Higher is safer, lower allows smaller windows.",
+    )
+    hysteresis: float = _opt(
+        0.5,
+        lo=0.0,
+        hi=3.0,
+        doc="How far past the border between two windows the gaze must be, as a fraction of "
+        "your gaze error.",
+    )
+    min_window_px: int = _opt(
+        240,
+        lo=0,
+        hi=4000,
+        doc="Windows whose visible part is narrower (or lower) than this many pixels never "
+        "take part.",
+    )
+    pause_off_range: float = _opt(
+        0.25,
+        lo=0.0,
+        hi=2.0,
+        doc="Window switching pauses while your head is farther than this from the range you "
+        "calibrated in (the larger of the roll, side, up/down and distance offsets, as a "
+        "fraction of that range). 0 turns the pause off.",
+    )
+
+
+@dataclass
 class PresenceSettings:
     enabled: bool = _opt(True, doc="React when you walk away from the computer.")
     action: str = _opt(
@@ -411,6 +477,7 @@ class Settings:
     performance: PerformanceSettings = field(default_factory=PerformanceSettings)
     switching: SwitchingSettings = field(default_factory=SwitchingSettings)
     panes: PaneSettings = field(default_factory=PaneSettings)
+    windows: WindowSettings = field(default_factory=WindowSettings)
     presence: PresenceSettings = field(default_factory=PresenceSettings)
     privacy: PrivacySettings = field(default_factory=PrivacySettings)
     hotkeys: HotkeySettings = field(default_factory=HotkeySettings)

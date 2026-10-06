@@ -29,6 +29,7 @@ SECTION_TITLES = {
     "performance": "Performance",
     "switching": "Switching",
     "panes": "Split panes (experimental)",
+    "windows": "Window focus (experimental)",
     "presence": "Walk-away (presence)",
     "privacy": "Privacy",
     "hotkeys": "Hotkeys",

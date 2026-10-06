@@ -1343,6 +1343,29 @@ class SettingsDialog(QDialog):
         panes.addRow(desktop_hint)
         self._depends(follow, [move, precision, desktop, desktop_hint])
 
+        windows = self._group(layout, "Window focus (experimental)")
+        win_follow = self._check(
+            windows, "windows.enabled", "Also move keyboard focus to the window I look at"
+        )
+        if not self._caps.get("windows", False):
+            win_follow.setText(win_follow.text() + " (not supported on this system)")
+        win_precision = self._float(
+            windows,
+            "windows.precision",
+            "Only windows at least",
+            decimals=1,
+            step=0.5,
+            suffix=" × my gaze error",
+        )
+        windows.addRow(
+            self._hint(
+                "macOS only. Raises the window you look at, on the monitor you are on. "
+                "Needs Accessibility permission. Pauses while your head is far from where "
+                "you calibrated."
+            )
+        )
+        self._depends(win_follow, [win_precision])
+
         learn = self._group(layout, "Adaptive accuracy")
         adaptive = self._check(learn, "learning.adaptive", "Learn from how I use the mouse")
         max_samples = self._int(

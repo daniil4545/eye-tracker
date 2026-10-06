@@ -79,6 +79,10 @@ _PANES_TIP = (
     "Experimental: keyboard focus also follows your gaze between large split panes "
     "of tmux, WezTerm and Windows Terminal"
 )
+_WINDOWS_TIP = (
+    "Experimental (macOS): keyboard focus also follows your gaze between large windows "
+    "on the monitor you are on"
+)
 
 
 class AutostartBackend(Protocol):
@@ -267,6 +271,7 @@ class TrayIcon(QObject):
         self._sync_hotkeys()
         self.action_overlay.setChecked(settings.ui.show_gaze_overlay)
         self.action_panes.setChecked(settings.panes.enabled)
+        self.action_windows.setChecked(settings.windows.enabled)
 
     def tooltip_text(self) -> str:
         """E.g. ``"Eye Tracker — Tracking · 4 fps · CPU 0.6 %"``."""
@@ -343,6 +348,9 @@ class TrayIcon(QObject):
         self.action_overlay.setToolTip("Draw a dot where the tracker thinks you are looking")
         self.action_panes = self._add_action("Follow split panes", self._on_panes, checkable=True)
         self.action_panes.setToolTip(_PANES_TIP)
+        self.action_windows = self._add_action("Follow windows", self._on_windows, checkable=True)
+        self.action_windows.setToolTip(_WINDOWS_TIP)
+        self.action_windows.setVisible(sys.platform == "darwin")
         self.action_preview = self._add_action("Camera preview…", self._on_preview)
         self.action_preview.setToolTip("See what the camera sees (never saved)")
         menu.addSeparator()
@@ -399,6 +407,7 @@ class TrayIcon(QObject):
         self.action_calibrate.setEnabled(not busy)
         self.action_overlay.setChecked(self._settings.ui.show_gaze_overlay)
         self.action_panes.setChecked(self._settings.panes.enabled)
+        self.action_windows.setChecked(self._settings.windows.enabled)
         self.action_status.setIcon(icons.status_dot_icon(_STATUS_COLORS.get(state, _MUTED_GREY)))
         self._sync_texts()
         self._sync_tooltips()
@@ -608,6 +617,13 @@ class TrayIcon(QObject):
         if self._call("apply_settings", updated):
             self._settings = util.controller_settings(self._controller)
         self.action_panes.setChecked(self._settings.panes.enabled)
+
+    def _on_windows(self, checked: bool) -> None:
+        updated = util.controller_settings(self._controller).copy()
+        updated.windows.enabled = bool(checked)
+        if self._call("apply_settings", updated):
+            self._settings = util.controller_settings(self._controller)
+        self.action_windows.setChecked(self._settings.windows.enabled)
 
     def _on_autostart(self, checked: bool) -> None:
         try:

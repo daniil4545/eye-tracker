@@ -12,7 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ..config import SwitchingSettings, WindowSettings
 from ..types import Rect, WindowInfo, WindowRef
+from .decider import PaneConfig
 from .types import Pane, PaneSnapshot
 
 #: Windows and pieces smaller than this on either side are noise (popups, slivers).
@@ -106,3 +108,18 @@ def window_snapshot(
         for window, piece in pieces
     )
     return PaneSnapshot(window_handle=index, panes=panes, taken_at=now)
+
+
+def window_pane_config(windows: WindowSettings, switching: SwitchingSettings) -> PaneConfig:
+    """Tuning of the window decider from the user-facing settings (mouse grace is shared)."""
+    return PaneConfig(
+        dwell_s=windows.dwell_ms / 1000.0,
+        typing_grace_s=windows.typing_grace_ms / 1000.0,
+        reading_grace_s=windows.reading_grace_ms / 1000.0,
+        cooldown_s=windows.cooldown_ms / 1000.0,
+        mouse_grace_s=switching.mouse_grace_ms / 1000.0,
+        manual_grace_s=windows.typing_grace_ms / 1000.0,
+        precision=float(windows.precision),
+        hysteresis=float(windows.hysteresis),
+        min_pane_px=float(windows.min_window_px),
+    )

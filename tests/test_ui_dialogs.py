@@ -327,6 +327,19 @@ UNBOUND = {
             "windows_terminal",
         )
     ),
+    *(
+        f"windows.{name}"
+        for name in (
+            "dwell_ms",
+            "typing_grace_ms",
+            "reading_grace_ms",
+            "cooldown_ms",
+            "after_monitor_switch_ms",
+            "hysteresis",
+            "min_window_px",
+            "pause_off_range",
+        )
+    ),
 }
 # ``panes.desktop_apps`` has a checkbox: it reads another app's accessibility
 # tree, so it is a visible, deliberate choice (off by default).
@@ -403,6 +416,39 @@ def test_split_pane_options_on_the_switching_page(
     dlg = SettingsDialog(controller)
     try:
         box = dlg.widget_for("panes.enabled")
+        assert isinstance(box, QCheckBox)
+        assert box.text().endswith("(not supported on this system)")
+    finally:
+        _dispose(dlg)
+
+
+def test_window_focus_options_on_the_switching_page(
+    controller: FakeController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caps = dict.fromkeys(PlatformServices().capabilities(), True)
+    monkeypatch.setattr(controller.platform, "capabilities", lambda: dict(caps))
+    dlg = SettingsDialog(controller)
+    try:
+        follow = dlg.widget_for("windows.enabled")
+        precision = dlg.widget_for("windows.precision")
+        assert isinstance(follow, QCheckBox)
+        assert not follow.isChecked()  # experimental: off by default
+        assert not follow.text().endswith("(not supported on this system)")
+        assert not precision.isEnabled()
+        follow.setChecked(True)
+        assert precision.isEnabled()
+        precision.setValue(2.0)  # type: ignore[attr-defined]
+        assert dlg.apply()
+        new = controller.applied[-1]
+        assert new.windows.enabled is True
+        assert new.windows.precision == pytest.approx(2.0)
+        assert new.windows.dwell_ms == 500  # not in the dialog: kept as it was
+    finally:
+        _dispose(dlg)
+    caps["windows"] = False
+    dlg = SettingsDialog(controller)
+    try:
+        box = dlg.widget_for("windows.enabled")
         assert isinstance(box, QCheckBox)
         assert box.text().endswith("(not supported on this system)")
     finally:
