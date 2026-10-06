@@ -1734,6 +1734,7 @@ class LinuxPlatform(PlatformServices):
                 "hotkeys": has_display and xlib,
                 # Needs the focused window and its geometry, like "focus".
                 "panes": x11 and xlib,
+                "windows": False,
             }
         except Exception:
             log.debug("capability probe failed", exc_info=True)

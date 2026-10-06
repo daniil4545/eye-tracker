@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .. import __version__
-from ..types import AppIdentity, Rect, WindowRef
+from ..types import AppIdentity, Rect, WindowInfo, WindowRef
 from .base import PlatformServices
 
 log = logging.getLogger(__name__)
@@ -339,6 +339,28 @@ def _cg_user_windows(
         if rect is None or rect.w < 2 or rect.h < 2:
             continue
         yield pid, rect
+
+
+def _cg_window_infos(
+    windows: Iterable[Mapping[str, Any]], monitor: Rect, own_pid: int
+) -> list[WindowInfo]:
+    """Windows of the list that touch the monitor and carry a window number."""
+    result: list[WindowInfo] = []
+    for info in windows:
+        try:
+            number = int(info["kCGWindowNumber"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for pid, rect in _cg_user_windows([info], own_pid):
+            touches = (
+                rect.x < monitor.right
+                and monitor.x < rect.right
+                and rect.y < monitor.bottom
+                and monitor.y < rect.bottom
+            )
+            if touches:
+                result.append(WindowInfo(number=number, pid=pid, rect=rect))
+    return result
 
 
 def _cg_window_at(
@@ -635,6 +657,7 @@ class MacPlatform(PlatformServices):
             "camera_in_use": False,
             "hotkeys": _IS_MACOS,
             "panes": focus,
+            "windows": focus and quartz,
         }
 
     # ---------------------------------------------------------- session/power
@@ -807,6 +830,13 @@ class MacPlatform(PlatformServices):
         if window is not None:
             rect = _ax_rect(self._ax(), window) or rect
         return WindowRef(handle=(pid, window), pid=pid, rect=rect)
+
+    def windows_on(self, monitor: Rect) -> list[WindowInfo] | None:
+        """Ordinary windows touching a monitor, front to back (ids and frames only)."""
+        windows = self._cg_windows()
+        if windows is None:
+            return None
+        return _cg_window_infos(windows, monitor, os.getpid())
 
     def _cg_windows(self) -> list[Mapping[str, Any]] | None:
         """On-screen windows, front to back; ``None`` when the list is unavailable."""

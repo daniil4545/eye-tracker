@@ -198,6 +198,15 @@ class WindowRef:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowInfo:
+    """One on-screen window as the window list reports it (no title, only ids and frame)."""
+
+    number: int  # kCGWindowNumber
+    pid: int
+    rect: Rect  # full frame, Qt coordinates
+
+
+@dataclass(frozen=True, slots=True)
 class AppIdentity:
     """Which application a window belongs to (``PlatformServices.window_app``).
 

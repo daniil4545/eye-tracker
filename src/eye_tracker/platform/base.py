@@ -15,7 +15,7 @@ import logging
 import ntpath
 from typing import ClassVar
 
-from ..types import AppIdentity, Rect, WindowRef
+from ..types import AppIdentity, Rect, WindowInfo, WindowRef
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,8 @@ class PlatformServices:
         Keys: ``lock``, ``display_off``, ``wake_display``, ``input_idle``,
         ``key_idle``, ``session_locked``, ``focus``, ``cursor``, ``camera_in_use``,
         ``hotkeys``, ``panes`` (:meth:`window_app` and :meth:`window_client_rect`
-        work, so split panes of supported terminals can be followed).
+        work, so split panes of supported terminals can be followed), ``windows``
+        (:meth:`windows_on` lists the windows of a monitor).
         """
         return {
             "lock": False,
@@ -69,6 +70,7 @@ class PlatformServices:
             "camera_in_use": False,
             "hotkeys": False,
             "panes": False,
+            "windows": False,
         }
 
     # ------------------------------------------------------------ session/power
@@ -121,6 +123,10 @@ class PlatformServices:
 
     def window_at(self, x: int, y: int) -> WindowRef | None:
         """Top-level window under a screen point (excluding our own windows)."""
+        return None
+
+    def windows_on(self, monitor: Rect) -> list[WindowInfo] | None:
+        """Ordinary windows on a monitor, front to back; ``None`` when not available."""
         return None
 
     def activate_window(self, ref: WindowRef) -> bool:

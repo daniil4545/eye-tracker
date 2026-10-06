@@ -20,7 +20,7 @@ import pytest
 
 from eye_tracker.platform import macos
 from eye_tracker.platform.base import PlatformServices
-from eye_tracker.types import AppIdentity, Rect, WindowRef
+from eye_tracker.types import AppIdentity, Rect, WindowInfo, WindowRef
 
 PYOBJC_MODULES = (
     "Quartz",
@@ -141,9 +141,19 @@ class FakeQuartz:
 
 
 def cg_window(
-    pid: int, x: float, y: float, w: float, h: float, *, layer: int = 0, alpha: float = 1.0
+    pid: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    layer: int = 0,
+    alpha: float = 1.0,
+    number: int | None = None,
 ) -> dict[str, Any]:
+    extra = {} if number is None else {"kCGWindowNumber": number}
     return {
+        **extra,
         "kCGWindowOwnerPID": pid,
         "kCGWindowLayer": layer,
         "kCGWindowAlpha": alpha,
@@ -1165,6 +1175,48 @@ def test_capabilities_with_frameworks(plat: macos.MacPlatform, recorder: Recorde
         caps[key] for key in ("key_idle", "session_locked", "focus", "cursor", "hotkeys", "panes")
     )
     assert caps["camera_in_use"] is False
+    assert caps["windows"] is True
+
+
+@pytest.mark.usefixtures("on_macos", "quartz")
+def test_windows_on_filters_layer_alpha_own_pid(
+    plat: macos.MacPlatform, quartz: FakeQuartz, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(macos.os, "getpid", lambda: 999)
+    quartz.windows = [
+        cg_window(PID, 0, 0, 800, 600, number=11),
+        cg_window(PID, 0, 0, 800, 600, layer=25, number=12),  # menu bar level
+        cg_window(PID, 0, 0, 800, 600, alpha=0.0, number=13),  # invisible
+        cg_window(999, 0, 0, 800, 600, number=14),  # ours
+        cg_window(PID, 0, 0, 800, 600),  # no window number
+        cg_window(PID, 5000, 0, 800, 600, number=15),  # on another monitor
+    ]
+    found = plat.windows_on(Rect(0, 0, 1920, 1080))
+    assert found == [WindowInfo(number=11, pid=PID, rect=Rect(0, 0, 800, 600))]
+
+
+@pytest.mark.usefixtures("on_macos", "quartz")
+def test_windows_on_front_to_back(plat: macos.MacPlatform, quartz: FakeQuartz) -> None:
+    quartz.windows = [
+        cg_window(PID, 100, 100, 300, 300, number=3),
+        cg_window(PID + 1, 0, 0, 1000, 1000, number=2),
+        cg_window(PID, 0, 0, 500, 500, number=1),
+    ]
+    found = plat.windows_on(Rect(0, 0, 1920, 1080))
+    assert found is not None
+    assert [w.number for w in found] == [3, 2, 1]
+    quartz.windows = []
+    assert plat.windows_on(Rect(0, 0, 1920, 1080)) == []
+
+
+def test_windows_on_unavailable_is_none(plat: macos.MacPlatform) -> None:
+    assert plat.windows_on(Rect(0, 0, 1920, 1080)) is None  # Quartz missing
+    assert PlatformServices().windows_on(Rect(0, 0, 10, 10)) is None
+
+
+def test_windows_capability_off_by_default(plat: macos.MacPlatform) -> None:
+    assert PlatformServices().capabilities()["windows"] is False
+    assert plat.capabilities()["windows"] is False  # no frameworks
 
 
 def test_module_contract() -> None:
