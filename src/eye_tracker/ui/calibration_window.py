@@ -1276,7 +1276,7 @@ class CalibrationWindow(QObject):
         """``profile`` with the positions taken added; its learned samples stay and
         count in the model, as they did before."""
         assert self._series is not None
-        samples = merge_poses(profile.samples, self._series.samples)
+        samples = balance_pose_weights(merge_poses(profile.samples, self._series.samples))
         if profile.implicit_samples:
             model = refit_model(samples, profile.implicit_samples, model, monitors=self._monitors)
         return replace(
