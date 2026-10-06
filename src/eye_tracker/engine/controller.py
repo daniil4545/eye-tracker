@@ -113,6 +113,7 @@ from ..panes.decider import (
 from ..panes.providers.command import window_key
 from ..panes.registry import PaneRegistry, default_providers, is_denied
 from ..panes.types import Pane, PaneSnapshot
+from ..panes.windows import window_pane_config, window_snapshot
 from ..panes.worker import DetectResult, FocusResult, PaneWorker
 from ..platform.base import PlatformServices
 from ..trace import TraceWriter
@@ -504,6 +505,28 @@ def _named_backend_gaze_indices(name: str) -> tuple[int, ...] | None:
     return _backend_gaze_indices(cls)
 
 
+#: The head pose features whose offset from the calibrated range pauses window focus.
+_HEAD_FEATURES = ("roll", "tx", "ty", "tz")
+
+
+@functools.cache
+def _named_backend_head_indices(name: str) -> tuple[int, ...]:
+    """Indices of :data:`_HEAD_FEATURES` in a backend's feature vector.
+
+    Empty unless the backend has all of them (``lite`` has no ``tx``, ``ty``,
+    ``tz``): window focus is then never paused for the head position.
+    """
+    try:
+        from ..vision.backends import backend_class
+
+        names = tuple(backend_class(name).feature_names)
+    except Exception:
+        return ()
+    if not all(f in names for f in _HEAD_FEATURES):
+        return ()
+    return tuple(names.index(f) for f in _HEAD_FEATURES)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class _BuiltBackend:
     """A backend the worker built through one of our factories."""
@@ -745,6 +768,16 @@ class Controller(QObject):
         ) = None
         self._pane_sigma_used: tuple[float, float] | None = None
         self._pane_switches = 0
+        # Window focus (experimental, see eye_tracker.panes.windows): a second
+        # decider whose "panes" are the visible parts of the windows of a monitor.
+        self._window_decider = PaneDecider(window_pane_config(s.windows, s.switching))
+        self._window_capable: bool | None = None  # the platform's "windows" capability
+        self._window_snapshot: PaneSnapshot | None = None
+        self._window_sigma_used: tuple[float, float] | None = None
+        self._window_switches = 0
+        self._head_off_range = False  # head pose outside the calibrated range
+        self._head_pauses = 0
+        self._last_window_decision: PaneDecision | None = None
         # Where the cursor was last seen in each pane (panes.move_cursor): window
         # key -> (the window, pane id -> position), most recently used last.
         self._pane_cursor: dict[object, tuple[WindowRef, dict[Any, tuple[int, int]]]] = {}
@@ -1247,6 +1280,10 @@ class Controller(QObject):
 
         self._decider.set_config(SwitchConfig.from_settings(new.switching))
         self._pane_decider.set_config(PaneConfig.from_settings(new.panes, new.switching))
+        self._window_decider.set_config(window_pane_config(new.windows, new.switching))
+        if old.windows.enabled and not new.windows.enabled:
+            self._window_decider.reset()
+            self._window_snapshot = None
         if old.panes != new.panes or old.switching.enabled != new.switching.enabled:
             self._reconfigure_panes(providers_changed=_pane_providers(old) != _pane_providers(new))
         self._filter.set_smoothing(new.switching.smoothing)
@@ -1383,6 +1420,7 @@ class Controller(QObject):
             "switches": self._switch_count,
             "hotkeys": self._hotkey_status(),
             "panes": self._pane_status(),
+            "windows": self._window_status(),
         }
 
     def _pane_status(self) -> dict[str, Any]:
@@ -1403,6 +1441,22 @@ class Controller(QObject):
             "switches": self._pane_switches,
             "sigma_px": None if sigma is None else [round(sigma[0], 1), round(sigma[1], 1)],
             "failed_providers": sorted(worker.disabled_providers) if worker is not None else [],
+        }
+
+    def _window_status(self) -> dict[str, Any]:
+        """Window focus at a glance: counts and numbers only, never titles or names."""
+        snapshot = self._window_snapshot
+        sigma = self._window_sigma_used
+        fallback = (FALLBACK_GAZE_ERROR_PX, FALLBACK_GAZE_ERROR_PX)
+        return {
+            "enabled": bool(self._settings.windows.enabled),
+            "supported": self._windows_supported(),
+            "windows": len(snapshot.panes) if snapshot is not None else 0,
+            "eligible": eligible_panes(snapshot, sigma or fallback, self._window_decider.config),
+            "switches": self._window_switches,
+            "head_paused": self._head_off_range,
+            "head_pauses": self._head_pauses,
+            "sigma_px": None if sigma is None else [round(sigma[0], 1), round(sigma[1], 1)],
         }
 
     def _hotkey_status(self) -> dict[str, Any]:
@@ -1519,9 +1573,16 @@ class Controller(QObject):
             return
         remember = self._settings.switching.focus_window
         panes = self._panes_wanted()
-        if not (remember or panes):
+        windows = self._windows_wanted()
+        if not windows:
+            self._window_snapshot = None
+        if not (remember or panes or windows):
             return
         ref = self._platform_call("foreground_window")
+        if windows:
+            self._poll_windows(ref if isinstance(ref, WindowRef) else None, now)
+        if not (remember or panes):
+            return
         if not isinstance(ref, WindowRef) or ref.rect is None or not self._monitors:
             if panes:
                 self._forget_pane_window()
@@ -1534,6 +1595,131 @@ class Controller(QObject):
             self._memory.record_window(monitor.index, ref)
         if panes:
             self._follow_pane_window(ref, now)
+
+    # --------------------------------------------------------- window focus
+    def _windows_supported(self) -> bool:
+        """The platform's ``windows`` capability (asked once; absent counts as off)."""
+        if self._window_capable is None:
+            caps = self._platform_call("capabilities", default={})
+            self._window_capable = bool(isinstance(caps, dict) and caps.get("windows", False))
+        return self._window_capable
+
+    def _windows_wanted(self) -> bool:
+        """Window focus is on and can work: without a usable calibration it is silent."""
+        s = self._settings
+        return bool(
+            s.windows.enabled
+            and s.switching.enabled
+            and self._model is not None
+            and self._windows_supported()
+        )
+
+    def _poll_windows(self, foreground: WindowRef | None, now: float) -> None:
+        """Rebuild the window snapshot of the monitor the pointer is on."""
+        index = self._current_monitor(self._cursor_pos())
+        monitor = next((m for m in self._monitors if m.index == index), None)
+        infos = self._platform_call("windows_on", monitor.rect) if monitor is not None else None
+        if monitor is None or not isinstance(infos, list):
+            self._window_snapshot = None
+            return
+        self._window_snapshot = window_snapshot(infos, monitor.rect, monitor.index, foreground, now)
+
+    def _head_out_of_range(self, obs: Observation) -> bool:
+        """Is the head farther from the calibrated range than ``windows.pause_off_range``?
+
+        Frames without features keep the last answer. Without all four head
+        features (``lite`` backend), with a model that does not know its range or
+        on any error the answer is "no": the pause never blocks for lack of data.
+        """
+        limit = float(self._settings.windows.pause_off_range)
+        model = self._model
+        if not obs.usable or obs.features is None:
+            return self._head_off_range
+        info = self._current_backend()
+        indices = _named_backend_head_indices(info[0]) if info is not None else ()
+        if limit <= 0 or model is None or not indices:
+            return False
+        try:
+            excess = model.extrapolation(obs.features)
+            return bool(max(float(excess[i]) for i in indices) > limit)
+        except (ValueError, RuntimeError, IndexError, TypeError) as exc:
+            log.debug("Cannot tell how far the head is from the calibrated range: %s", exc)
+            return False
+
+    def _window_step(
+        self,
+        now: float,
+        obs: Observation,
+        gaze: tuple[float, float] | None,
+        decision: Decision,
+        enabled: bool,
+        current: int | None,
+    ) -> PaneDecision:
+        """Give the window under the gaze the keyboard focus, on the monitor the
+        pointer is on, once the monitor decider is content (reason ``same``)."""
+        s = self._settings.windows
+        head_off = self._head_out_of_range(obs)
+        if head_off and not self._head_off_range:
+            self._head_pauses += 1
+            log.debug("Head out of the calibrated range: window focus paused")
+        self._head_off_range = head_off
+        snapshot = self._window_snapshot
+        monitor = next((m for m in self._monitors if m.index == current), None)
+        active = (
+            enabled
+            and s.enabled
+            and self._windows_supported()
+            and self._model is not None
+            and decision.target is None
+            and decision.reason == "same"
+            and now - self._decider.last_switch_time >= s.after_monitor_switch_ms / 1000.0
+            and monitor is not None
+            and snapshot is not None
+            and snapshot.window_handle == monitor.index  # the pointer has not moved on since
+        )
+        rect = monitor.rect if monitor is not None else None
+        sigma = self._pane_sigma(rect) if active and rect is not None else None
+        if active:
+            self._window_sigma_used = sigma
+        result = self._window_decider.update(
+            now,
+            None if head_off else gaze,
+            rect,
+            snapshot,
+            sigma,
+            self._input.last_mouse_activity,
+            self._input.last_key_activity,
+            enabled=active,
+        )
+        if result.target is not None and monitor is not None and gaze is not None:
+            self._focus_window(result.target, monitor, gaze, now)
+        return result
+
+    def _focus_window(
+        self, target: Pane, monitor: Monitor, gaze: tuple[float, float], now: float
+    ) -> None:
+        """Raise the window ``target`` stands for, if it is still where the gaze is.
+
+        The decider armed its cooldown when it fired, so a refusal is not
+        retried before it is over. The cursor does not move.
+        """
+        infos = self._platform_call("windows_on", monitor.rect)
+        fresh = window_snapshot(infos, monitor.rect, monitor.index, None, now)
+        pane = fresh.pane(target.id) if fresh is not None else None
+        x, y = round(gaze[0]), round(gaze[1])
+        if pane is None or not pane.rect.contains(x, y):
+            log.debug("The window to focus has gone or moved")
+            return
+        owner = next((w.pid for w in infos if w.number == target.id), None)
+        ref = self._platform_call("window_at", x, y)
+        if not isinstance(ref, WindowRef) or owner is None or ref.pid != owner:
+            log.debug("Another window than the expected one is under the gaze")
+            return
+        if not self._activate(monitor, ref):
+            return
+        self._window_switches += 1
+        if self._window_snapshot is not None:
+            self._window_snapshot = self._window_snapshot.with_focus(target.id)
 
     # ---------------------------------------------------------- split panes
     def _panes_supported(self) -> bool:
@@ -2042,6 +2228,7 @@ class Controller(QObject):
         self._update_state()
         self._last_decision = None
         self._last_pane_decision = None
+        self._last_window_decision = None
         if self._state is TrackingState.TRACKING:
             self._track(obs, now)
             self._update_state()
@@ -2115,6 +2302,7 @@ class Controller(QObject):
         cursor = self._cursor_pos()
         decision = self._last_decision
         pane = self._last_pane_decision
+        window = self._last_window_decision
         snapshot = self._pane_snapshot
         gaze = self._last_gaze if self._last_gaze_time == now else None
         trace.write(
@@ -2142,6 +2330,11 @@ class Controller(QObject):
                 "pane_prog": trace.number(pane.progress, 2) if pane else None,
                 "pane_target": _trace_id(pane.target.id) if pane and pane.target else None,
                 "n_panes": len(snapshot.panes) if snapshot is not None else 0,
+                # Window focus: window numbers only, never titles or names.
+                "win_cand": _trace_id(window.candidate) if window else None,
+                "win_reason": window.reason if window else None,
+                "win_target": _trace_id(window.target.id) if window and window.target else None,
+                "head_off": self._head_off_range,
             }
         )
 
@@ -2177,9 +2370,16 @@ class Controller(QObject):
         self._last_decision = decision
         if decision.target is not None:
             self._switch_to(decision.target, gaze, cursor, current, now)
-        pane = self._pane_step(now, gaze, decision, enabled)
+        window = self._window_step(now, obs, gaze, decision, enabled, current)
+        self._last_window_decision = window
+        # The window under the gaze is the focused one (or none): panes work inside it.
+        own = self._window_snapshot.focused if self._window_snapshot is not None else None
+        here = window.target is None and (
+            window.candidate is None or (own is not None and window.candidate == own.id)
+        )
+        pane = self._pane_step(now, gaze, decision, enabled and here)
         self._last_pane_decision = pane
-        self._pending = decision.pending or pane.pending
+        self._pending = decision.pending or pane.pending or window.pending
 
     def _current_monitor(self, cursor: tuple[int, int] | None) -> int | None:
         """Index of the monitor the pointer is on (``None`` if unknown)."""
@@ -2288,6 +2488,8 @@ class Controller(QObject):
 
         self._decider.notify_switched(now, target)
         self._pane_decider.reset()  # another monitor: another pane context
+        self._window_decider.reset()
+        self._window_snapshot = None
         self._assumed_monitor = target
         if self._last_switch is not None:
             self._drift.record_switch(True)  # the previous switch was kept until now
@@ -2297,11 +2499,11 @@ class Controller(QObject):
         log.debug("Switched to monitor %d (cursor %d, %d)", target, x, y)
         self.switched.emit(target)
 
-    def _activate(self, monitor: Monitor, window: WindowRef) -> None:
+    def _activate(self, monitor: Monitor, window: WindowRef) -> bool:
         if self._platform_call("activate_window", window, default=False):
             self._memory.record_window(monitor.index, window)
             self._activation_failures = 0
-            return
+            return True
         log.debug("Could not activate the window on monitor %d", monitor.index)
         self._activation_failures += 1
         if self._activation_failures >= ACTIVATION_FAILURE_LIMIT:
@@ -2309,6 +2511,7 @@ class Controller(QObject):
             # lock, a window that closed); only a missing permission is reported.
             self._activation_failures = 0
             self._check_accessibility()
+        return False
 
     def _remembered_window(self, monitor: Monitor) -> WindowRef | None:
         """The last window used on ``monitor`` if it still exists and is still there."""
@@ -2763,6 +2966,9 @@ class Controller(QObject):
     def _reset_tracking(self) -> None:
         self._decider.reset()
         self._pane_decider.reset()
+        self._window_decider.reset()
+        self._window_snapshot = None
+        self._head_off_range = False
         self._filter.reset()
         self._pending = False
         self._last_gaze = None
@@ -2949,6 +3155,9 @@ class Controller(QObject):
             return
         self._model = None
         self._calibration_reason = reason
+        self._window_decider.reset()
+        self._window_snapshot = None
+        self._head_off_range = False
         if was_usable:
             log.warning("Calibration no longer usable: %s", reason)
             if announce:
@@ -3153,10 +3362,11 @@ class Controller(QObject):
         """Tell the user (once) when focus cannot follow the gaze for lack of the
         macOS Accessibility permission, or because it belongs to an older build."""
         sw = self._settings.switching
+        windows = self._settings.windows.enabled
         if (
             self._accessibility_notice_shown
-            or not (sw.enabled and sw.focus_window)
-            or len(self._monitors) < 2
+            or not (sw.enabled and (sw.focus_window or windows))
+            or (len(self._monitors) < 2 and not windows)
         ):
             return
         status = self._platform_call("accessibility_status")

@@ -42,6 +42,7 @@ from eye_tracker.types import (
     Observation,
     Rect,
     TrackingState,
+    WindowInfo,
     WindowRef,
     WorkerStats,
     layout_signature,
@@ -174,6 +175,10 @@ class FakePlatform(PlatformServices):
         # Split panes: the application of each window handle, and the capability.
         self.apps: dict[Any, AppIdentity] = {}
         self.panes_capable = True
+        # Window focus: the capability and the window list (front to back).
+        self.windows_capable = True
+        self.windows: list[WindowInfo] | None = []
+        self.windows_calls = 0
 
     def names(self) -> list[str]:
         return [c[0] for c in self.calls]
@@ -181,7 +186,21 @@ class FakePlatform(PlatformServices):
     def capabilities(self) -> dict[str, bool]:
         caps = super().capabilities()
         caps["panes"] = self.panes_capable
+        caps["windows"] = self.windows_capable
         return caps
+
+    def windows_on(self, monitor: Rect) -> list[WindowInfo] | None:
+        self.windows_calls += 1
+        if self.windows is None:
+            return None
+        return [
+            w
+            for w in self.windows
+            if w.rect.x < monitor.right
+            and monitor.x < w.rect.right
+            and w.rect.y < monitor.bottom
+            and monitor.y < w.rect.bottom
+        ]
 
     def window_app(self, ref: WindowRef) -> AppIdentity | None:
         self.calls.append(("window_app", ref.handle))
@@ -3287,3 +3306,310 @@ def test_trace_records_pane_decisions(
     fired = next(r for r in rows if r.get("pane_reason") == "switch")
     assert fired["pane_target"] == "%1"
     assert fired["n_panes"] == 2
+
+
+# ------------------------------------------------------------------ window focus
+WIN_A = WindowInfo(1, 11, Rect(0, 0, 960, 1080))  # focused, left half of the left monitor
+WIN_B = WindowInfo(2, 12, Rect(960, 0, 960, 1080))  # right half
+WIN_C = WindowInfo(3, 13, Rect(1200, 200, 400, 400))  # in front of B
+REF_A = WindowRef(handle=(11, None), pid=11, rect=WIN_A.rect)
+REF_B = WindowRef(handle=(12, None), pid=12, rect=WIN_B.rect)
+REF_C = WindowRef(handle=(13, None), pid=13, rect=WIN_C.rect)
+ON_B = (1440, 900)  # B, below C
+ON_C = (1400, 400)
+
+
+def window_settings() -> Settings:
+    s = make_settings()
+    s.windows.enabled = True
+    return s
+
+
+def make_window_controller(
+    make_controller: Callable[..., Harness],
+    settings: Settings | None = None,
+    windows: list[WindowInfo] | None = None,
+) -> Harness:
+    platform = FakePlatform()
+    platform.windows = [WIN_C, WIN_A, WIN_B] if windows is None else windows
+    platform.foreground = REF_A
+    platform.window_under = REF_B
+    h = make_controller(settings or window_settings(), platform=platform)
+    settle_mouse(h)  # the window list is polled, every guard has expired
+    return h
+
+
+def activations(h: Harness) -> list[Any]:
+    return [c[1] for c in h.platform.calls if c[0] == "activate_window"]
+
+
+def look_at_window(h: Harness, point: tuple[float, float], seconds: float = 1.5) -> None:
+    h.feed(gaze_obs(LEFT_PANE), 1.0)  # work in the focused window first
+    h.feed(gaze_obs(point), seconds)
+
+
+def test_gaze_on_another_window_activates_it(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller)
+    look_at_window(h, ON_B)
+    assert activations(h) == [REF_B.handle]
+    assert h.cursor.moves == []  # the cursor does not follow
+    assert h.events["switched"] == []
+    status = h.controller.status()["windows"]
+    assert status["switches"] == 1
+    assert status["windows"] == 3
+    assert status["supported"] is True
+    h.platform.foreground = REF_B  # the focus is where the user looks: nothing more
+    h.feed(gaze_obs(ON_B), 2.0)
+    assert activations(h) == [REF_B.handle]
+
+
+def test_window_focus_is_off_by_default(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller, make_settings())
+    look_at_window(h, ON_B)
+    assert activations(h) == []
+    assert h.platform.windows_calls == 0
+    assert h.controller.status()["windows"]["enabled"] is False
+
+
+def test_overlapped_window_hit_test(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller)
+    h.platform.window_under = REF_C
+    look_at_window(h, ON_C)
+    assert activations(h) == [REF_C.handle]  # C is in front of B at that point
+
+
+def test_hit_on_another_app_than_the_listed_one_is_refused(
+    make_controller: Callable[..., Harness],
+) -> None:
+    h = make_window_controller(make_controller)
+    h.platform.window_under = REF_A  # the window list and the hit test disagree
+    look_at_window(h, ON_B)
+    assert activations(h) == []
+
+
+def test_no_window_switch_after_monitor_switch(make_controller: Callable[..., Harness]) -> None:
+    s = window_settings()
+    s.switching.focus_window = False
+    right_focused = WindowInfo(5, 15, Rect(1920, 0, 960, 1080))
+    right_other = WindowInfo(6, 16, Rect(2880, 0, 960, 1080))
+    h = make_window_controller(make_controller, s, [WIN_A, WIN_B, right_focused, right_other])
+    h.platform.foreground = WindowRef((15, None), 15, right_focused.rect)
+    h.platform.window_under = WindowRef((16, None), 16, right_other.rect)
+    h.feed(gaze_obs(RIGHT_CENTRE), 0.5)
+    assert h.events["switched"] == [1]
+    h.feed(gaze_obs((3400, 540)), 1.0)  # still within after_monitor_switch_ms (1.5 s)
+    assert activations(h) == []
+    h.feed(gaze_obs((3400, 540)), 3.0)
+    assert activations(h) == [(16, None)]
+
+
+def test_typing_holds_window_switching(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller)
+    h.platform.key_idle = 0.0  # typing in the focused window
+    look_at_window(h, ON_B, 1.0)
+    h.platform.key_idle = 1000.0
+    h.feed(gaze_obs(ON_B), 1.0)
+    assert activations(h) == []  # the typing grace is 3 s
+    h.feed(gaze_obs(ON_B), 3.0)
+    assert activations(h) == [REF_B.handle]
+
+
+def test_window_closed_before_activation(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller)
+    monitor = h.monitors[0]
+    target = Pane(WIN_B.number, WIN_B.rect, False, "windows")
+    h.platform.windows = [WIN_A]  # B closed between the poll and the action
+    h.controller._focus_window(target, monitor, ON_B, h.clock())
+    assert activations(h) == []
+    h.platform.windows = [WIN_A, WindowInfo(2, 12, Rect(0, 0, 800, 600))]  # moved away
+    h.controller._focus_window(target, monitor, ON_B, h.clock())
+    assert activations(h) == []
+    assert h.controller.status()["windows"]["switches"] == 0
+
+
+def test_activation_refused_notifies_and_backs_off(
+    make_controller: Callable[..., Harness],
+) -> None:
+    h = make_window_controller(make_controller)
+    h.platform.activate_ok = False
+    h.platform.accessibility = "missing"
+    h.feed(gaze_obs(LEFT_PANE), 1.0)
+    h.feed(gaze_obs(ON_B), 3.5)  # the cooldown (1 s) spaces the retries
+    tries = len(activations(h))
+    assert 2 <= tries <= 4
+    h.feed(gaze_obs(ON_B), 3.0)
+    assert 2 <= len(activations(h)) <= 8
+    assert h.controller.status()["windows"]["switches"] == 0
+    assert any(
+        "Accessibility" in msg or "focus" in title.lower() for title, msg in h.events["notify"]
+    )
+
+
+def test_panes_work_in_focused_window(make_controller: Callable[..., Harness]) -> None:
+    s = pane_settings()
+    s.windows.enabled = True
+    terminal = WindowInfo(1, TERMINAL.pid or 0, TERMINAL.rect)
+    h, provider = make_pane_controller(make_controller, s)
+    h.platform.windows = [terminal]
+    settle_mouse(h)
+    h.feed(gaze_obs(LEFT_PANE), 1.0)
+    h.feed(gaze_obs(RIGHT_PANE), 1.0)
+    assert ("focus", "%1") in provider.calls
+    assert "activate_window" not in h.platform.names()
+
+
+def test_unsupported_platform_never_starts(make_controller: Callable[..., Harness]) -> None:
+    platform = FakePlatform()
+    platform.windows_capable = False
+    platform.windows = [WIN_A, WIN_B]
+    platform.foreground = REF_A
+    platform.window_under = REF_B
+    h = make_controller(window_settings(), platform=platform)
+    settle_mouse(h)
+    look_at_window(h, ON_B)
+    assert platform.windows_calls == 0
+    assert activations(h) == []
+    assert h.controller.status()["windows"]["supported"] is False
+
+
+def test_window_focus_silent_when_calibration_unusable(
+    make_controller: Callable[..., Harness],
+) -> None:
+    # Several monitors, calibration judged unusable (the camera's format changed).
+    h = make_window_controller(make_controller)
+    look_at_window(h, ON_B, 0.3)  # dwell under way
+    h.controller._invalidate_calibration("the camera's aspect ratio changed")
+    calls = h.platform.windows_calls
+    h.feed(gaze_obs(ON_B), 3.0)
+    assert activations(h) == []
+    assert h.platform.windows_calls == calls  # the window list is not even polled
+    assert h.controller.status()["windows"]["windows"] == 0
+    # One monitor / switching off: tracking goes on with no model.
+    s = window_settings()
+    s.switching.enabled = False
+    h2 = make_window_controller(make_controller, s)
+    look_at_window(h2, ON_B)
+    assert activations(h2) == []
+    assert h2.platform.windows_calls == 0
+
+
+def test_reset_tracking_forgets_the_window_state(make_controller: Callable[..., Harness]) -> None:
+    h = make_window_controller(make_controller)
+    look_at_window(h, ON_B, 0.3)
+    assert h.controller.status()["windows"]["windows"] == 3
+    h.controller._reset_tracking()
+    assert h.controller.status()["windows"]["windows"] == 0
+    assert h.controller._window_decider.last_switch_time == -float("inf")
+
+
+# --- head position (H1)
+class _Extrapolation:
+    """Replaces ``GazeModel.extrapolation``: the offsets of (roll, tx) from the range."""
+
+    def __init__(self) -> None:
+        self.excess = [0.0, 0.0]
+        self.fail: Exception | None = None
+
+    def __call__(self, x: Any) -> Any:
+        if self.fail is not None:
+            raise self.fail
+        return np.array(self.excess)
+
+
+def head_controller(
+    make_controller: Callable[..., Harness],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    indices: tuple[int, ...] = (0, 1),
+    settings: Settings | None = None,
+) -> tuple[Harness, _Extrapolation]:
+    monkeypatch.setattr(controller_module, "_named_backend_head_indices", lambda name: indices)
+    h = make_window_controller(make_controller, settings)
+    fake = _Extrapolation()
+    assert h.controller._model is not None
+    monkeypatch.setattr(h.controller._model, "extrapolation", fake)
+    return h, fake
+
+
+def test_head_out_of_range_pauses_window_focus(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, fake = head_controller(make_controller, monkeypatch)
+    fake.excess = [0.0, 0.5]  # beyond pause_off_range (0.25)
+    look_at_window(h, ON_B, 2.5)
+    assert activations(h) == []
+    status = h.controller.status()["windows"]
+    assert status["head_paused"] is True
+    assert status["head_pauses"] == 1
+    assert h.controller._last_window_decision is not None
+    assert h.controller._last_window_decision.reason == "no_gaze"
+    fake.excess = [0.0, 0.1]  # back in range
+    h.feed(gaze_obs(ON_B), 1.5)
+    assert activations(h) == [REF_B.handle]
+    assert h.controller.status()["windows"]["head_paused"] is False
+
+
+def test_head_pause_off_at_zero(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = window_settings()
+    s.windows.pause_off_range = 0.0
+    h, fake = head_controller(make_controller, monkeypatch, settings=s)
+    fake.excess = [0.9, 0.9]
+    look_at_window(h, ON_B)
+    assert activations(h) == [REF_B.handle]
+    assert h.controller.status()["windows"]["head_pauses"] == 0
+
+
+def test_head_pause_keeps_monitor_switching(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, fake = head_controller(make_controller, monkeypatch)
+    fake.excess = [0.9, 0.9]
+    h.feed(gaze_obs(RIGHT_CENTRE), 1.0)
+    assert h.events["switched"] == [1]
+
+
+def test_head_pause_unknown_features_never_pauses(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A backend without roll, tx, ty and tz (lite): no indices, no pause.
+    h, fake = head_controller(make_controller, monkeypatch, indices=())
+    fake.excess = [0.9, 0.9]
+    look_at_window(h, ON_B)
+    assert activations(h) == [REF_B.handle]
+    assert h.controller.status()["windows"]["head_paused"] is False
+
+
+def test_head_pause_survives_a_broken_vector_and_blank_frames(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, fake = head_controller(make_controller, monkeypatch)
+    fake.fail = ValueError("wrong size")
+    assert h.controller._head_out_of_range(gaze_obs(ON_B)) is False  # logged, no pause
+    fake.fail = None
+    fake.excess = [0.0, 0.6]
+    assert h.controller._head_out_of_range(gaze_obs(ON_B)) is True
+    h.controller._head_off_range = True
+    blank = Observation(timestamp=0.0, face_count=1, features=None)
+    assert h.controller._head_out_of_range(blank) is True  # no features: state unchanged
+    h.controller._head_off_range = False
+    assert h.controller._head_out_of_range(blank) is False
+
+
+def test_trace_records_window_decisions(
+    make_controller: Callable[..., Harness], tmp_path: Any
+) -> None:
+    path = tmp_path / "trace.jsonl"
+    platform = FakePlatform()
+    platform.windows = [WIN_A, WIN_B]
+    platform.foreground = REF_A
+    platform.window_under = REF_B
+    h = make_controller(window_settings(), platform=platform, trace_path=path)
+    settle_mouse(h)
+    look_at_window(h, ON_B)
+    h.controller.shutdown()
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    fired = next(r for r in rows if r.get("win_reason") == "switch")
+    assert fired["win_target"] == 2
+    assert "title" not in json.dumps(fired)
