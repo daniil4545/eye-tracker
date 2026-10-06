@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Window focus (macOS, experimental, off by default): on the monitor you are on, the window you look
+  at gets the keyboard focus and comes forward after a dwell (`windows.*` settings, **Follow windows**
+  in the tray menu). Only windows large enough for your calibration's measured error take part, and
+  it pauses while your head is outside the calibrated range. See [window focus](docs/windows.md).
+- Calibration: after the dots, a dot moves over each monitor (40 s per monitor) while you follow it
+  with your eyes and may move your head. Frames are labelled with the dot's position 0.1 s earlier,
+  and together they weigh as much as the dots. In one session with head movement the mean error was
+  288 px, against 357 px with the earlier calibration. See
+  [calibration](docs/calibration.md#the-moving-dot).
+
+### Fixed
+
+- On macOS, focusing a window brings only that window forward, not all windows of its app.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added
