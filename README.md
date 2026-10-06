@@ -25,6 +25,12 @@
   <img src="assets/demo.svg" alt="Animation: looking at the left monitor moves the cursor and keyboard focus there; looking right brings them back" width="820">
 </p>
 
+> **This is a fork** of [bugraskl/eye-tracker](https://github.com/bugraskl/eye-tracker). It adds
+> [window focus](docs/windows.md) on macOS (the window you look at gets the keyboard focus) and a
+> moving-dot stage in the [calibration](docs/calibration.md#the-moving-dot). The downloads
+> below are upstream's builds and do not include these features, so build from source:
+> [building](docs/building.md).
+
 ## Why Eye Tracker
 
 With two or more monitors, you look at the screen you want to work on and then still have to drag the
@@ -47,6 +53,8 @@ network.
 | 🛡️ | **No accidental switches** | Dwell time, hysteresis at the bezels, typing and mouse grace periods, and glances at your phone or desk are ignored. |
 | 📖 | **Reading-aware** | Copying from a document on the other screen? Focus stays in your editor while you read. |
 | 🪟 | **Split-pane focus** (experimental) | Off by default. Look at another pane of a tmux, WezTerm or Windows Terminal window and it gets the keyboard focus (the cursor follows, to where you left it in that pane); panes too small for your calibration's accuracy are left alone. Opt-in on Windows: sessions side by side in the Claude desktop app, or a conversation and its side chat in the ChatGPT (and Codex) desktop app, with the focus in the message box of the one you look at ([details](docs/panes.md)). |
+| 🪟 | **Window focus** (experimental, macOS, this fork) | Off by default. Look at a window on the monitor you are on and, after 0.5 s, it gets the keyboard focus and comes forward, alone and not with all windows of its app. Only windows large enough for your calibration's accuracy take part, and it pauses while your head is outside the range you calibrated in ([details](docs/windows.md)). |
+| 🔴 | **Moving-dot calibration** (this fork) | After the dots, a dot moves over each monitor for 40 s while you follow it with your eyes and may move your head. This gives the model frames from many head positions. In one test session with head movement, the mean error was 288 px, against 357 px with the earlier calibration ([details](docs/calibration.md#the-moving-dot)). |
 | 🎯 | **Learns as you work** | Every time you move the mouse somewhere and stop, the calibration gets a little better. |
 | 🚶 | **Walk-away lock** | No face and no input for 45 s: lock and/or displays off, announced by a 10 s countdown during the last seconds. Displays wake when you return. Until the setup assistant is finished, it only shows a notification. |
 | 🙈 | **Privacy mode** | One hotkey releases the camera completely; the webcam light goes out. It stays on after a restart or an update until you turn it off. |
@@ -87,9 +95,9 @@ take new versions from the releases page.
    happens when you walk away. Until it is finished, walking away only shows a notification. (If
    Eye Tracker first starts at sign-in, the assistant is offered as a notification; you can also
    open it with **Run setup assistant…** under Settings → General.)
-3. **Calibrate**: look at the dots as they appear, about 15 seconds per monitor.
-   ([Calibration guide](docs/calibration.md)) With one monitor there is nothing to switch
-   between, and no calibration is needed.
+3. **Calibrate**: look at the dots as they appear, about 15 seconds per monitor, then follow
+   a moving dot for 40 seconds per monitor. ([Calibration guide](docs/calibration.md)) With one monitor there is nothing to switch
+   between, and no calibration is needed, unless you use window focus.
 4. Work normally. Look at the other monitor and start typing.
 
 Default hotkeys:
@@ -128,7 +136,8 @@ flowchart LR
 - **Decision.** A switch needs a steady look past the bezel for 0.3 s, and is held back while you type,
   use the mouse or read the other screen during typing.
 - **Action.** The cursor returns to where you left it on that monitor, and the last window you used
-  there gets keyboard focus.
+  there gets keyboard focus. With [window focus](docs/windows.md) on (macOS), the window you look
+  at on that monitor gets it too.
 
 Deeper dive: [architecture](docs/architecture.md).
 
@@ -263,7 +272,7 @@ lamp slightly.
 <summary><b>I have one monitor. Is this useful?</b></summary>
 
 Switching needs two or more monitors, but walk-away lock, privacy mode and the shoulder guard work
-with one.
+with one. So does window focus on macOS, which needs a calibration.
 </details>
 
 <details>
