@@ -604,6 +604,19 @@ def _monitor_from_dict(d: Any) -> Monitor:
     )
 
 
+def save_samples(samples: Iterable[CalibrationSample], path: Path) -> None:
+    """Write ``samples`` alone to ``path`` (numbers only), e.g. a rejected pose run
+    kept for offline analysis. Raises ``OSError`` if writing fails."""
+    doc = {"created_at": utc_now_iso(), "samples": _samples_to_list(samples)}
+    atomic_write_text(Path(path), _compact(doc))
+
+
+def load_samples(path: Path) -> list[CalibrationSample]:
+    """Samples written by :func:`save_samples`."""
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    return _samples_from_list(doc.get("samples", []) if isinstance(doc, dict) else [], "samples")
+
+
 # -------------------------------------------------------------------- samples
 def _samples_to_list(samples: Iterable[CalibrationSample]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []

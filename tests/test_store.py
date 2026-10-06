@@ -21,8 +21,10 @@ from eye_tracker.gaze.store import (
     CalibrationLibrary,
     axis_error,
     load_calibration,
+    load_samples,
     same_aspect,
     save_calibration,
+    save_samples,
     utc_now_iso,
 )
 from eye_tracker.types import Monitor, Rect, layout_signature, virtual_bounds
@@ -738,3 +740,18 @@ def test_recomputing_an_old_profile_is_cheap_enough_for_the_gui_thread() -> None
     assert sigma == pytest.approx(tuple(expected["1"]), rel=1e-6)  # same as a new report
     # Measured: ~4 ms on a desktop. The bound leaves room for slow CI machines.
     assert elapsed < 0.25, f"{elapsed * 1000:.0f} ms"
+
+
+def test_save_samples_round_trip(tmp_path: Path) -> None:
+    samples = [
+        CalibrationSample(np.array([0.1, -0.2]), 10.0, 20.0, 0, 1003, 0.5),
+        CalibrationSample(np.array([0.3, 0.4]), -5.0, -900.0, 1, 2),
+    ]
+    path = tmp_path / "rejected-poses.json"
+    save_samples(samples, path)
+    loaded = load_samples(path)
+    assert [(s.x, s.y, s.monitor_index, s.point_id, s.weight) for s in loaded] == [
+        (10.0, 20.0, 0, 1003, 0.5),
+        (-5.0, -900.0, 1, 2, 1.0),
+    ]
+    assert np.allclose(loaded[1].features, [0.3, 0.4])

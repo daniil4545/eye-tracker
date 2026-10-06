@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import paths
 from ..config import Settings
 from ..gaze.calibration import (
     EVENT_FINISHED,
@@ -101,12 +102,15 @@ from ..gaze.calibration import (
 )
 from ..gaze.learning import refit_model
 from ..gaze.model import GazeModel, gaze_feature_indices
-from ..gaze.store import CalibrationData, utc_now_iso
+from ..gaze.store import CalibrationData, save_samples, utc_now_iso
 from ..types import Monitor, Observation, layout_signature
 from . import util
 from .util import screen_for_monitor, ui_scale
 
 log = logging.getLogger(__name__)
+
+#: Samples of the last rejected pose run, beside calibration.json.
+REJECTED_POSES_FILE = "rejected-poses.json"
 
 __all__ = [
     "IDLE_TIMEOUT_S",
@@ -1604,6 +1608,7 @@ class CalibrationWindow(QObject):
             worse = pose_regression(self._profile.report, report)
             if worse is not None:
                 log.info("Head positions rejected: usual position %.0f -> %.0f px", *worse)
+                self._keep_rejected_run()
                 self._show_error(
                     f"With these positions your usual position gets worse (median error "
                     f"{worse[1]:.0f} px, was {worse[0]:.0f} px). "
@@ -1615,6 +1620,16 @@ class CalibrationWindow(QObject):
         self._last_input_at = self._clock()  # the idle timeout counts from the result
         self._set_state(STATE_RESULT)
         self._show_result(report)
+
+    def _keep_rejected_run(self) -> None:
+        """Keep the samples of a rejected pose run for offline analysis (numbers only)."""
+        path = paths.data_dir() / REJECTED_POSES_FILE
+        try:
+            save_samples(self._fit_samples(), path)
+        except OSError as exc:
+            log.warning("Could not keep the rejected head positions: %s", exc)
+        else:
+            log.info("Rejected head positions kept in %s", path)
 
     def _fit_failed(self, error: BaseException) -> None:
         collector = self._collector
