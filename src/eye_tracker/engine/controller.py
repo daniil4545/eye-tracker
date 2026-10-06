@@ -1658,7 +1658,7 @@ class Controller(QObject):
         """Give the window under the gaze the keyboard focus, on the monitor the
         pointer is on, once the monitor decider is content (reason ``same``)."""
         s = self._settings.windows
-        head_off = self._head_out_of_range(obs)
+        head_off = s.enabled and self._head_out_of_range(obs)
         if head_off and not self._head_off_range:
             self._head_pauses += 1
             log.debug("Head out of the calibrated range: window focus paused")
