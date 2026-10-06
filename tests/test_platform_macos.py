@@ -683,14 +683,33 @@ def test_window_at_hit_test_fallback(
 
 @pytest.mark.usefixtures("quartz")
 def test_activate_window_full_sequence(
-    plat: macos.MacPlatform, ax: FakeAX, appkit: FakeAppKit
+    plat: macos.MacPlatform, ax: FakeAX, appkit: FakeAppKit, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(macos.MacPlatform, "_front_window_only", staticmethod(lambda pid: False))
     ax.window("win", (0, 0, 10, 10))
     assert plat.activate_window(WindowRef(handle=(PID, "win"), pid=PID)) is True
     assert ("win", "AXMain", True) in ax.sets
     assert (f"app:{PID}", "AXFrontmost", True) in ax.sets
     assert ax.actions == [("win", "AXRaise")]
     assert appkit.apps[PID].activations == [2]
+
+
+@pytest.mark.usefixtures("quartz")
+def test_activate_window_brings_only_its_window_forward(
+    plat: macos.MacPlatform, ax: FakeAX, appkit: FakeAppKit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fronted: list[int] = []
+    monkeypatch.setattr(
+        macos.MacPlatform,
+        "_front_window_only",
+        staticmethod(lambda pid: fronted.append(pid) or True),
+    )
+    ax.window("win", (0, 0, 10, 10))
+    assert plat.activate_window(WindowRef(handle=(PID, "win"), pid=PID)) is True
+    assert fronted == [PID]
+    assert ax.actions == [("win", "AXRaise")]
+    assert (f"app:{PID}", "AXFrontmost", True) not in ax.sets  # it would raise every window
+    assert appkit.apps[PID].activations == []
 
 
 def test_activate_window_refuses_minimised(

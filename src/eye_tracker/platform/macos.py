@@ -66,6 +66,9 @@ _IS_MACOS = sys.platform == "darwin"
 
 LOGIN_FRAMEWORK = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
 AVFOUNDATION_FRAMEWORK = "/System/Library/Frameworks/AVFoundation.framework"
+APPLICATION_SERVICES_FRAMEWORK = (
+    "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+)
 
 _PERMISSION_URLS = {
     "accessibility": (
@@ -86,6 +89,8 @@ _AX_VALUE_CGSIZE = 2  # kAXValueCGSizeType
 _AX_SUCCESS = 0
 _AX_ERROR_CANNOT_COMPLETE = -25204  # kAXErrorCannotComplete: the app did not answer in time
 _NS_ACTIVATE_IGNORING_OTHER_APPS = 1 << 1
+#: ``kSetFrontProcessFrontWindowOnly``: bring the app forward with its front window only.
+_FRONT_WINDOW_ONLY = 1
 _NS_ACTIVATION_POLICY_ACCESSORY = 1
 #: NSActivityUserInitiatedAllowingIdleSystemSleep: no App Nap and no timer
 #: coalescing, while the system and the displays may still sleep when idle.
@@ -927,6 +932,7 @@ class MacPlatform(PlatformServices):
             self._warn_untrusted_once()
         # Every AX call to a hung app would block for the full timeout.
         ax = self._ax() if trusted and self._ax_responsive(pid) else None
+        raised = False
         if ax is not None and window is not None:
             try:
                 err, minimized = _ax_attr_err(ax, window, "AXMinimized")
@@ -939,6 +945,11 @@ class MacPlatform(PlatformServices):
                 ax = None
             else:
                 _ax_set(ax, window, "AXMain", True)
+                # Making the whole app frontmost raises all its windows, unlike a click.
+                _ax_perform(ax, window, "AXRaise")
+                raised = True
+                if self._front_window_only(pid):
+                    return True
         activated = False
         appkit = self._mod("AppKit")
         if appkit is not None:
@@ -960,11 +971,36 @@ class MacPlatform(PlatformServices):
                 log.debug("AXUIElementCreateApplication failed: %s", exc)
             else:
                 activated = _ax_set(ax, app_element, "AXFrontmost", True) or activated
-            if window is not None:
+            if window is not None and not raised:
                 _ax_perform(ax, window, "AXRaise")
         if not trusted and _macos_major_version() >= 14:
             return False
         return activated
+
+    @staticmethod
+    def _front_window_only(pid: int) -> bool:
+        """``SetFrontProcessWithOptions`` with only the front window, as a click does.
+
+        Deprecated but still working; Hammerspoon focuses windows the same way.
+        """
+        try:
+            lib = _load_library(APPLICATION_SERVICES_FRAMEWORK)
+            psn = (ctypes.c_uint32 * 2)()
+            get_process = lib.GetProcessForPID
+            get_process.restype = ctypes.c_int32
+            get_process.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            set_front = lib.SetFrontProcessWithOptions
+            set_front.restype = ctypes.c_int32
+            set_front.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            if get_process(pid, ctypes.byref(psn)) != 0:
+                return False
+            status = int(set_front(ctypes.byref(psn), _FRONT_WINDOW_ONLY))
+        except (OSError, AttributeError, TypeError, ValueError) as exc:
+            log.debug("SetFrontProcessWithOptions unavailable: %s", exc)
+            return False
+        if status != 0:
+            log.debug("SetFrontProcessWithOptions returned %s", status)
+        return status == 0
 
     def is_window_valid(self, ref: WindowRef) -> bool:
         """Running, not hidden or minimised, and on a Space that is shown right now.
