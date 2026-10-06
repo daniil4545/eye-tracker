@@ -49,6 +49,11 @@ GRADE_THRESHOLDS: tuple[tuple[str, float], ...] = (
     ("fair", 0.75),
 )
 
+#: Head-pose calibration: the dots of pose ``n`` (1, 2, ...) have the ids
+#: ``n * POSE_ID_STRIDE + k``; the ordinary calibration is pose 0, learned samples
+#: have negative ids.
+POSE_ID_STRIDE = 1000
+
 MIN_SAMPLES = 10
 MIN_POINTS = 3
 
@@ -84,6 +89,7 @@ def make_plan(
     monitors: Sequence[Monitor],
     points_per_monitor: int = 9,
     margin: float = 0.1,
+    first_id: int = 0,
 ) -> list[CalibrationTarget]:
     """Calibration targets for every monitor, in the order they should be shown.
 
@@ -92,7 +98,7 @@ def make_plan(
     visited left to right (then top to bottom). Within a monitor the grid is
     walked as a serpentine; the orientation of that walk is chosen so that it
     starts at the corner nearest to where the previous monitor ended, which keeps
-    eye and head travel short. ``point_id`` counts up from 0.
+    eye and head travel short. ``point_id`` counts up from ``first_id``.
     """
     if not 0.0 <= margin < 0.5:
         raise ValueError(f"margin must be in [0, 0.5), got {margin!r}")
@@ -116,7 +122,7 @@ def make_plan(
             path = variants[distances.index(min(distances))]
         for nx, ny in path:
             x, y = rect.denormalize(nx, ny)
-            plan.append(CalibrationTarget(len(plan), monitor.index, nx, ny, x, y))
+            plan.append(CalibrationTarget(first_id + len(plan), monitor.index, nx, ny, x, y))
         last = (plan[-1].x, plan[-1].y)
     return plan
 
@@ -155,6 +161,28 @@ class CalibrationSample:
     monitor_index: int
     point_id: int
     weight: float = 1.0
+
+
+def place_groups(samples: Iterable[CalibrationSample]) -> np.ndarray:
+    """One group id per sample: the place looked at, to the pixel.
+
+    The same place in another pose (another ``point_id``) is the same group, so
+    cross-validation never trains on a dot it is asked to predict. Mirrored plan
+    variants differ in the last float digits, hence the rounding.
+    """
+    places: dict[tuple[int, int, int], int] = {}
+    return np.array(
+        [
+            places.setdefault((s.monitor_index, round(float(s.x)), round(float(s.y))), len(places))
+            for s in samples
+        ],
+        dtype=np.int64,
+    )
+
+
+def pose_of(point_id: int) -> int:
+    """Pose number of a calibration sample: 0 for the ordinary calibration."""
+    return point_id // POSE_ID_STRIDE if point_id >= 0 else -1
 
 
 def samples_to_arrays(
@@ -427,6 +455,12 @@ class CalibrationReport:
     #: large compared with it. Empty in reports saved before it existed (see
     #: :func:`eye_tracker.gaze.store.axis_error`) and for uncovered monitors.
     per_monitor_error_px: dict[int, tuple[float, float]] = field(default_factory=dict)
+    #: Median held-out error in pixels per pose (0 is the ordinary calibration); the
+    #: dot is held out, the pose is not. Empty in reports saved before it existed.
+    per_pose_error_px: dict[int, float] = field(default_factory=dict)
+    #: Median error per pose when the whole pose is held out: what to expect in a
+    #: head position that was not calibrated. Empty with fewer than two poses.
+    unseen_pose_error_px: dict[int, float] = field(default_factory=dict)
 
     def summary(self) -> str:
         """One human-readable line, e.g. ``"Excellent — 99% monitor accuracy, 180 samples"``."""
@@ -448,6 +482,8 @@ class CalibrationReport:
             str(k): [_json_number(float(v)) for v in xy]
             for k, xy in self.per_monitor_error_px.items()
         }
+        for key in ("per_pose_error_px", "unseen_pose_error_px"):
+            out[key] = {str(k): _json_number(float(v)) for k, v in getattr(self, key).items()}
         return {k: _json_number(v) for k, v in out.items()}
 
     @classmethod
@@ -469,9 +505,26 @@ class CalibrationReport:
                 degree=int(data.get("degree", 2)),
                 uncovered_monitors=[int(i) for i in data.get("uncovered_monitors") or []],
                 per_monitor_error_px=axis_errors_from_dict(data.get("per_monitor_error_px")),
+                per_pose_error_px=pose_errors_from_dict(data.get("per_pose_error_px")),
+                unseen_pose_error_px=pose_errors_from_dict(data.get("unseen_pose_error_px")),
             )
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
             raise ValueError(f"invalid calibration report: {exc}") from exc
+
+
+def pose_errors_from_dict(value: Any) -> dict[int, float]:
+    """``per_pose_error_px`` as stored (``{"0": 120.0}``); damaged entries are dropped."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[int, float] = {}
+    for key, error in value.items():
+        try:
+            pose, px = int(key), float(error)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(px) and px >= 0.0:
+            out[pose] = px
+    return dict(sorted(out.items()))
 
 
 def axis_errors_from_dict(value: Any) -> dict[int, tuple[float, float]]:
@@ -570,7 +623,7 @@ def evaluate(
     if len(usable) < len(samples):
         log.warning("Ignoring %d samples of unknown monitors", len(samples) - len(usable))
 
-    point_ids = np.array([s.point_id for s in usable])
+    point_ids = place_groups(usable)
     covered = {s.monitor_index for s in usable}
     if (
         len(usable) < MIN_SAMPLES
@@ -610,6 +663,21 @@ def evaluate(
     correct = np.array([p == t for p, t in zip(predicted, truth.tolist(), strict=True)])
     errors = np.hypot(preds[:, 0] - Y[:, 0], preds[:, 1] - Y[:, 1])
     finite = errors[np.isfinite(errors)]
+    poses = np.array([pose_of(s.point_id) for s in usable])
+    per_pose = _median_by_pose(errors, poses)
+    unseen: dict[int, float] = {}
+    if np.unique(poses).shape[0] >= 2:
+        held_out = lopo_predictions(
+            X,
+            Y,
+            poses,
+            selection.alpha,
+            degree=selection.degree,
+            bounds=bounds,
+            weights=W,
+            nonlinear=nonlinear,
+        )
+        unseen = _median_by_pose(np.hypot(*(held_out - Y).T), poses)
 
     # A monitor without dots was never calibrated: the model only extrapolates
     # there, and gaze at it is often where the face is lost. An "Excellent"
@@ -635,6 +703,8 @@ def evaluate(
         degree=selection.degree,
         uncovered_monitors=[int(i) for i in uncovered],
         per_monitor_error_px=per_axis_errors(preds, Y, truth.tolist()),
+        per_pose_error_px=per_pose,
+        unseen_pose_error_px=unseen,
     )
     model = GazeModel(degree=selection.degree, alpha=selection.alpha, nonlinear=nonlinear).fit(
         X, Y, W, bounds, regions=[m.rect for m in monitor_list]
@@ -646,6 +716,15 @@ def evaluate(
         report.alpha,
     )
     return model, report
+
+
+def _median_by_pose(errors: np.ndarray, poses: np.ndarray) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for pose in np.unique(poses):
+        rows = errors[(poses == pose) & np.isfinite(errors)]
+        if rows.size:
+            out[int(pose)] = float(np.median(rows))
+    return out
 
 
 def _predicted_monitor(monitors: Sequence[Monitor], point: np.ndarray) -> int | None:

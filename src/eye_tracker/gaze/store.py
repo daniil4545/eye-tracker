@@ -38,6 +38,7 @@ from .calibration import (
     CalibrationSample,
     axis_errors_from_dict,
     per_axis_errors,
+    place_groups,
     samples_to_arrays,
 )
 from .model import SUPPORTED_DEGREES, GazeModel, lopo_predictions
@@ -262,7 +263,7 @@ def _recompute_axis_errors(data: CalibrationData) -> dict[int, tuple[float, floa
     """Leave-one-point-out errors per monitor and axis of an older calibration."""
     known = {m.index for m in data.monitors}
     samples = [s for s in data.samples if s.monitor_index in known]
-    groups = np.array([s.point_id for s in samples])
+    groups = place_groups(samples)
     if not samples or np.unique(groups).shape[0] < 2:
         return {}
     report = data.report
