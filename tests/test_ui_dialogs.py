@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from eye_tracker.config import Settings, describe_settings
-from eye_tracker.gaze.calibration import CalibrationSample, CalibrationTarget
+from eye_tracker.gaze.calibration import PURSUIT_POSE, CalibrationSample, CalibrationTarget
 from eye_tracker.gaze.store import CalibrationData
 from eye_tracker.platform import autostart
 from eye_tracker.platform.base import PlatformServices
@@ -913,6 +913,40 @@ def calib() -> Iterator[tuple[CalibrationWindow, FakeController, FakeClock]]:
     yield window, controller, clock
     window.cancel()
     _dispose(window)
+
+
+def test_the_moving_dot_follows_the_dots_and_joins_the_calibration() -> None:
+    controller = FakeController()
+    clock = FakeClock()
+    window = CalibrationWindow(
+        controller,
+        clock=clock,
+        points_per_monitor=5,
+        settle_s=0.2,
+        collect_s=0.3,
+        min_samples=3,
+        fit_in_thread=False,
+        pursuit_s=2.0,
+    )
+    rng = np.random.default_rng(8)
+    hints: set[str] = set()
+    try:
+        window.start()
+        QTest.keyClick(window.surfaces()[0], Qt.Key.Key_Space)
+
+        def make(target: CalibrationTarget | None) -> Observation:
+            hints.add(window.hint())
+            return _observation(target, clock(), rng)
+
+        _run_dots(window, controller, clock, make)
+        assert "Follow the dot with your eyes · you may move your head" in hints
+        window.tick()
+        report = window.report
+        assert report is not None
+        assert set(report.per_pose_error_px) == {0, PURSUIT_POSE}
+    finally:
+        window.cancel()
+        _dispose(window)
 
 
 def test_calibration_opens_one_frameless_topmost_surface_per_monitor(

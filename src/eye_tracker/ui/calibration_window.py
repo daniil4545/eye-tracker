@@ -89,6 +89,7 @@ from ..gaze.calibration import (
     POSE_MIN_ACCEPTED,
     POSE_POINTS,
     POSES,
+    PURSUIT_POSE,
     CalibrationCollector,
     CalibrationReport,
     CalibrationSample,
@@ -99,6 +100,7 @@ from ..gaze.calibration import (
     evaluate,
     evaluate_poses,
     make_plan,
+    make_pursuit,
     merge_poses,
     pose_regression,
 )
@@ -945,6 +947,8 @@ class CalibrationWindow(QObject):
         settle_s, collect_s, min_samples, max_retries: Collector timing, see
             :class:`~eye_tracker.gaze.calibration.CalibrationCollector`.
         margin: Distance of the outer dots from the screen edges (fraction).
+        pursuit_s: Seconds of the moving dot per monitor after the dots (0: none;
+            the head-pose mode never shows it).
         fit_in_thread: Fit the model on a background thread (default) instead
             of synchronously on the next tick.
 
@@ -972,6 +976,7 @@ class CalibrationWindow(QObject):
         margin: float = 0.1,
         fit_in_thread: bool = True,
         poses: bool = False,
+        pursuit_s: float = 0.0,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
@@ -986,6 +991,7 @@ class CalibrationWindow(QObject):
         self._points_per_monitor = points_per_monitor
         self._timing = (settle_s, collect_s, min_samples, max_retries)
         self._margin = margin
+        self._pursuit_s = pursuit_s
         self._fit_in_thread = fit_in_thread
         self._fit_future: Future[FitResult] | None = None
         self._fit_started = 0.0
@@ -1192,6 +1198,8 @@ class CalibrationWindow(QObject):
                 collect_s=collect_s,
                 min_samples=min_samples,
                 max_retries=max_retries,
+                pursuit=make_pursuit(self._monitors, self._margin),
+                pursuit_s=self._pursuit_s,
             )
         now = self._clock()
         self._pose_skip_at = -math.inf
@@ -1256,7 +1264,7 @@ class CalibrationWindow(QObject):
                 feature_version=str(feature_version),
                 layout_signature=layout_signature(self._monitors),
                 monitors=list(self._monitors),
-                samples=collector.samples,
+                samples=self._fit_samples(),
                 implicit_samples=[],
                 model=self._model,
                 report=self._report.to_dict(),
@@ -1463,6 +1471,8 @@ class CalibrationWindow(QObject):
             return "Can't see your face — check the camera", _WARNING
         if self._retrying:
             return "Keep looking at the dot…", _WARNING
+        if self._in_pursuit():
+            return "Follow the dot with your eyes · you may move your head", _TEXT
         series = self._series
         if series is not None and series.pose is not None:
             if series.phase == PHASE_WAIT:
@@ -1494,6 +1504,10 @@ class CalibrationWindow(QObject):
             arc = t
         return _DotState(x, y, target.x, target.y, pop, ring, arc, self._retrying, self.paused)
 
+    def _in_pursuit(self) -> bool:
+        collector = self._collector
+        return isinstance(collector, CalibrationCollector) and collector.in_pursuit
+
     def _render(self) -> None:
         if self._state != STATE_RUNNING or self._collector is None:
             return
@@ -1504,6 +1518,11 @@ class CalibrationWindow(QObject):
         total = len(self._plan)
         index = min(collector.current_index + 1, total)
         text = f"Dot {index} of {total}"
+        if self._in_pursuit():
+            assert isinstance(collector, CalibrationCollector)
+            text = (
+                f"Moving dot · screen {collector.pursuit_track + 1} of {collector.pursuit_tracks}"
+            )
         series = self._series
         if series is not None:
             per_pose = max(1, total // len(POSES))
@@ -1558,7 +1577,8 @@ class CalibrationWindow(QObject):
         if self._series is not None and self._profile is not None:
             return balance_pose_weights(merge_poses(self._profile.samples, self._series.samples))
         collector = self._collector
-        return collector.samples if collector is not None else []
+        # The many moving-dot frames together weigh as much as the dots.
+        return balance_pose_weights(collector.samples) if collector is not None else []
 
     def _fit(self, samples: Sequence[CalibrationSample]) -> Callable[[], FitResult]:
         """The fit to run: head positions are fitted two ways, the better one kept."""
@@ -1669,7 +1689,8 @@ class CalibrationWindow(QObject):
             return
         n_points = self._points_per_monitor * len(self._monitors)
         settle_s, collect_s, _, _ = self._timing
-        seconds = max(5, round(n_points * (settle_s + collect_s) / 5) * 5)
+        pursuit_s = len(self._monitors) * (settle_s + self._pursuit_s) if self._pursuit_s else 0.0
+        seconds = max(5, round((n_points * (settle_s + collect_s) + pursuit_s) / 5) * 5)
         screens = "screen" if len(self._monitors) == 1 else f"{len(self._monitors)} screens"
         for surface in self._surfaces:
             card = surface.show_card()
@@ -1679,9 +1700,14 @@ class CalibrationWindow(QObject):
                 "Look at each dot as it appears. Turn your head naturally — don't hold it still.",
                 size=13.0,
             )
+            if self._pursuit_s:
+                card.add_label(
+                    "Then follow a moving dot with your eyes; move your head freely meanwhile.",
+                    size=13.0,
+                )
             card.add_label(
                 f"{n_points} dots on {'one' if len(self._monitors) == 1 else 'your'} {screens}"
-                f" · about {seconds} seconds",
+                f"{' and a moving dot' if self._pursuit_s else ''} · about {seconds} seconds",
                 muted=True,
             )
             card.add_spacing(6)
@@ -1810,6 +1836,7 @@ class CalibrationWindow(QObject):
     def _pose_summary(self, report: CalibrationReport) -> str:
         """One line per head position: its error, and the error if it had not been taken."""
         names = {0: "Usual position", **{n + 1: p.name.capitalize() for n, p in enumerate(POSES)}}
+        names[PURSUIT_POSE] = "Moving dot"
         lines = []
         for pose, error in sorted(report.per_pose_error_px.items()):
             line = f"{names.get(pose, f'Position {pose}')}: {error:.0f} px"

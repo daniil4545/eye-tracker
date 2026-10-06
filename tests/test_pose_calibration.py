@@ -323,6 +323,14 @@ def test_worse_head_positions_are_a_regression() -> None:
     assert pose_regression(old, worse) == (400.0, 550.0)
 
 
+def test_the_moving_dot_is_not_a_head_position_for_the_regression() -> None:
+    old = CalibrationReport.to_dict(_report_with(200.0, 100.0))
+    old["per_pose_error_px"] = {"0": 100.0, "9": 50.0}  # a calibration with the moving dot
+    first = _report_with(0, 110.0)
+    first.per_pose_error_px.update({1: 600.0, 2: 500.0, 9: 300.0})
+    assert pose_regression(old, first) is None, "no head positions before: nothing to compare"
+
+
 def test_pose_samples_weigh_as_much_as_the_ordinary_dots() -> None:
     features = np.zeros(2)
     samples = [

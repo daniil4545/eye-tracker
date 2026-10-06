@@ -652,11 +652,14 @@ class EyeTrackerApp(QObject):
         if window is not None and window.is_active:
             window.start()  # raises the existing windows
             return
+        from .gaze.calibration import PURSUIT_S
         from .ui.calibration_window import CalibrationWindow
 
         log.info("Opening the calibration (%s)", reason)
         self._prompt = None
-        window = CalibrationWindow(self._controller, self, poses=poses)
+        window = CalibrationWindow(
+            self._controller, self, poses=poses, pursuit_s=0.0 if poses else PURSUIT_S
+        )
         window.finished.connect(functools.partial(self._on_calibration_finished, window, reason))
         # Assigned before start(): start() emits finished(False) at once when
         # there is no monitor, and the slot clears this reference.

@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 PHASE_IDLE = "idle"
 PHASE_SETTLE = "settle"
 PHASE_COLLECT = "collect"
+PHASE_PURSUIT = "pursuit"
 PHASE_DONE = "done"
 
 # Events returned by CalibrationCollector.update().
@@ -56,6 +57,21 @@ POSE_ID_STRIDE = 1000
 
 MIN_SAMPLES = 10
 MIN_POINTS = 3
+
+#: Moving-dot stage after the dots: the dot follows a 3:2 Lissajous figure inside
+#: the dots' margins, one period in ``PURSUIT_S`` per monitor, while the user may
+#: move the head. Its samples are pose ``PURSUIT_POSE``.
+PURSUIT_S = 40.0
+PURSUIT_POSE = 9
+#: Each frame is labelled with where the dot was this long before: the eyes trail
+#: a moving target (measured offline: 0.1 s fitted best).
+PURSUIT_LAG_S = 0.1
+#: No labels at the start of a path, while the eyes catch the dot.
+PURSUIT_WARMUP_S = 0.5
+#: Consecutive frames look almost the same; cross-validation hides a whole
+#: segment of the path at once (one group per segment, see place_groups).
+PURSUIT_SEGMENT_S = 2.0
+_PURSUIT_TRACK_STRIDE = 100
 
 #: Percentile of the absolute held-out error per axis that is reported as a
 #: monitor's gaze error (:attr:`CalibrationReport.per_monitor_error_px`). The 75th
@@ -127,6 +143,29 @@ def make_plan(
     return plan
 
 
+@dataclass(frozen=True, slots=True)
+class PursuitTrack:
+    """The moving dot's path over one monitor (``order``: position in the stage)."""
+
+    order: int
+    monitor: Monitor
+    margin: float
+
+    def target(self, u: float, point_id: int) -> CalibrationTarget:
+        """Where the dot is ``u`` (0..1) through its path; it starts at the centre."""
+        reach = 0.5 - self.margin
+        angle = 2.0 * math.pi * u
+        nx, ny = 0.5 + reach * math.sin(3.0 * angle), 0.5 + reach * math.sin(2.0 * angle)
+        x, y = self.monitor.rect.denormalize(nx, ny)
+        return CalibrationTarget(point_id, self.monitor.index, nx, ny, x, y)
+
+
+def make_pursuit(monitors: Sequence[Monitor], margin: float = 0.1) -> list[PursuitTrack]:
+    """One moving-dot path per monitor, in the order of :func:`make_plan`."""
+    ordered = sorted(monitors, key=lambda m: (m.rect.x, m.rect.y, m.index))
+    return [PursuitTrack(k, m, margin) for k, m in enumerate(ordered)]
+
+
 def _monitor_path(points: int, margin: float) -> list[tuple[float, float]]:
     lo, hi = margin, 1.0 - margin
     if points == 1:
@@ -168,12 +207,18 @@ def place_groups(samples: Iterable[CalibrationSample]) -> np.ndarray:
 
     The same place in another pose (another ``point_id``) is the same group, so
     cross-validation never trains on a dot it is asked to predict. Mirrored plan
-    variants differ in the last float digits, hence the rounding.
+    variants differ in the last float digits, hence the rounding. Moving-dot
+    samples are grouped by their path segment (their ``point_id``) instead.
     """
     places: dict[tuple[int, int, int], int] = {}
     return np.array(
         [
-            places.setdefault((s.monitor_index, round(float(s.x)), round(float(s.y))), len(places))
+            places.setdefault(
+                (-1, s.point_id, 0)
+                if pose_of(s.point_id) == PURSUIT_POSE
+                else (s.monitor_index, round(float(s.x)), round(float(s.y))),
+                len(places),
+            )
             for s in samples
         ],
         dtype=np.int64,
@@ -211,6 +256,11 @@ class CalibrationCollector:
     Every phase starts at the ``now`` of the :meth:`update` call that entered it,
     so a stalled UI thread never eats into the next target's time. Progress
     properties describe the state as of the last :meth:`start`/:meth:`update`.
+
+    With ``pursuit`` tracks and ``pursuit_s > 0`` the dots are followed by the
+    moving-dot stage: per track ``settle`` (the dot waits at the path start), then
+    ``pursuit`` for ``pursuit_s``; every usable frame becomes a sample labelled
+    with the dot's position :data:`PURSUIT_LAG_S` earlier.
     """
 
     def __init__(
@@ -220,9 +270,12 @@ class CalibrationCollector:
         collect_s: float = 1.0,
         min_samples: int = 5,
         max_retries: int = 1,
+        *,
+        pursuit: Sequence[PursuitTrack] = (),
+        pursuit_s: float = 0.0,
     ) -> None:
-        if settle_s < 0 or collect_s <= 0:
-            raise ValueError("settle_s must be >= 0 and collect_s > 0")
+        if settle_s < 0 or collect_s <= 0 or pursuit_s < 0:
+            raise ValueError("settle_s and pursuit_s must be >= 0 and collect_s > 0")
         if min_samples < 1 or max_retries < 0:
             raise ValueError("min_samples must be >= 1 and max_retries >= 0")
         self._plan: tuple[CalibrationTarget, ...] = tuple(plan)
@@ -230,11 +283,14 @@ class CalibrationCollector:
         self.collect_s = float(collect_s)
         self.min_samples = int(min_samples)
         self.max_retries = int(max_retries)
+        self.pursuit_s = float(pursuit_s)
+        self._tracks: tuple[PursuitTrack, ...] = tuple(pursuit) if pursuit_s > 0 else ()
         self._reset()
 
     def _reset(self) -> None:
         self._phase = PHASE_IDLE
         self._index = 0
+        self._track: int | None = None  # index into _tracks during the moving-dot stage
         self._phase_start = 0.0
         self._now = 0.0
         self._retries = 0
@@ -251,10 +307,12 @@ class CalibrationCollector:
         (or ``"finished"`` for an empty plan)."""
         self._reset()
         self._now = now
-        if not self._plan:
+        if not self._plan and not self._tracks:
             self._phase = PHASE_DONE
             self._events.append(EVENT_FINISHED)
             return
+        if not self._plan:
+            self._track = 0
         self._enter(PHASE_SETTLE, now)
         self._events.append(EVENT_TARGET)
 
@@ -262,7 +320,7 @@ class CalibrationCollector:
         """Advance the timers; returns the events since the last call, in order:
         ``"target"`` (a new target is current), ``"retry"`` (the current target gets
         another collect window) and ``"finished"``."""
-        if self._phase in (PHASE_SETTLE, PHASE_COLLECT):
+        if self._phase in (PHASE_SETTLE, PHASE_COLLECT, PHASE_PURSUIT):
             self._now = max(self._now, now)
             # Loop so zero-length phases (settle_s == 0) pass in a single call.
             while self._step(self._now):
@@ -277,7 +335,7 @@ class CalibrationCollector:
         copies (``skipped``) may repeat a frame from before the target appeared.
         """
         target = self.current
-        if self._phase != PHASE_COLLECT or target is None:
+        if self._phase not in (PHASE_COLLECT, PHASE_PURSUIT) or target is None:
             return False
         if not obs.usable or obs.skipped or obs.features is None:
             return False
@@ -293,9 +351,19 @@ class CalibrationCollector:
                 self._n_features,
             )
             return False
-        self._pending.append(
-            CalibrationSample(features, target.x, target.y, target.monitor_index, target.point_id)
-        )
+        if self._phase == PHASE_PURSUIT:
+            seen = self._pursuit_target(self._now - self._phase_start - PURSUIT_LAG_S)
+            if seen is None:
+                return False
+            self._samples.append(
+                CalibrationSample(features, seen.x, seen.y, seen.monitor_index, seen.point_id)
+            )
+        else:
+            self._pending.append(
+                CalibrationSample(
+                    features, target.x, target.y, target.monitor_index, target.point_id
+                )
+            )
         width, height = obs.frame_size
         if width > 0 and height > 0:
             self._frame_sizes[(int(width), int(height))] += 1
@@ -313,10 +381,34 @@ class CalibrationCollector:
 
     @property
     def current(self) -> CalibrationTarget | None:
-        """Target being shown, or ``None`` before start and after the last target."""
+        """Target being shown, or ``None`` before start and after the last target.
+
+        In the moving-dot stage: where the dot is now (its ``point_id`` names the
+        path segment)."""
+        if self._track is not None:
+            if self._phase == PHASE_SETTLE:
+                return self._tracks[self._track].target(0.0, self._segment_id(0.0))
+            if self._phase == PHASE_PURSUIT:
+                return self._pursuit_target(self._now - self._phase_start, warmup=0.0)
+            return None
         if self._phase in (PHASE_SETTLE, PHASE_COLLECT):
             return self._plan[self._index]
         return None
+
+    @property
+    def in_pursuit(self) -> bool:
+        """True during the moving-dot stage (its settle included)."""
+        return self._track is not None and self._phase in (PHASE_SETTLE, PHASE_PURSUIT)
+
+    @property
+    def pursuit_track(self) -> int:
+        """Position of the current moving-dot path (0-based), meaningful while in_pursuit."""
+        return self._track or 0
+
+    @property
+    def pursuit_tracks(self) -> int:
+        """Number of moving-dot paths (0: no moving-dot stage)."""
+        return len(self._tracks)
 
     @property
     def current_index(self) -> int:
@@ -331,26 +423,36 @@ class CalibrationCollector:
             return 1.0 if self.settle_s == 0 else _clamp01(elapsed / self.settle_s)
         if self._phase == PHASE_COLLECT:
             return _clamp01(elapsed / self.collect_s)
+        if self._phase == PHASE_PURSUIT:
+            return _clamp01(elapsed / self.pursuit_s)
         return 1.0 if self._phase == PHASE_DONE else 0.0
 
     @property
     def point_progress(self) -> float:
-        """0..1 through the current target, settle and collect time combined."""
-        total = self.settle_s + self.collect_s
+        """0..1 through the current target (or moving-dot path), settle time included."""
+        work = self.pursuit_s if self._track is not None else self.collect_s
+        total = self.settle_s + work
         if self._phase == PHASE_SETTLE:
             return self.phase_progress * self.settle_s / total
-        if self._phase == PHASE_COLLECT:
-            return (self.settle_s + self.phase_progress * self.collect_s) / total
+        if self._phase in (PHASE_COLLECT, PHASE_PURSUIT):
+            return (self.settle_s + self.phase_progress * work) / total
         return 1.0 if self._phase == PHASE_DONE else 0.0
 
     @property
     def progress(self) -> float:
-        """0..1 through the whole plan."""
+        """0..1 through the whole plan, the moving-dot stage included (by time)."""
         if self._phase == PHASE_DONE:
             return 1.0
-        if self._phase == PHASE_IDLE or not self._plan:
+        if self._phase == PHASE_IDLE or not (self._plan or self._tracks):
             return 0.0
-        return (self._index + self.point_progress) / len(self._plan)
+        dot_s = self.settle_s + self.collect_s
+        track_s = self.settle_s + self.pursuit_s
+        total = len(self._plan) * dot_s + len(self._tracks) * track_s
+        if self._track is None:
+            done = (self._index + self.point_progress) * dot_s
+        else:
+            done = len(self._plan) * dot_s + (self._track + self.point_progress) * track_s
+        return _clamp01(done / total)
 
     @property
     def current_sample_count(self) -> int:
@@ -384,13 +486,40 @@ class CalibrationCollector:
         self._phase = phase
         self._phase_start = now
 
+    def _segment_id(self, elapsed: float) -> int:
+        segment = min(int(elapsed // PURSUIT_SEGMENT_S), _PURSUIT_TRACK_STRIDE - 1)
+        track = self._track or 0
+        return PURSUIT_POSE * POSE_ID_STRIDE + track * _PURSUIT_TRACK_STRIDE + segment
+
+    def _pursuit_target(
+        self, elapsed: float, warmup: float = PURSUIT_WARMUP_S
+    ) -> CalibrationTarget | None:
+        """Where the moving dot was ``elapsed`` seconds into the current path."""
+        if self._track is None or elapsed < warmup:
+            return None
+        elapsed = min(elapsed, self.pursuit_s)
+        track = self._tracks[self._track]
+        return track.target(elapsed / self.pursuit_s, self._segment_id(elapsed))
+
     def _step(self, now: float) -> bool:
         """Perform at most one transition; True if one happened."""
         elapsed = now - self._phase_start + _TIME_EPS
         if self._phase == PHASE_SETTLE:
             if elapsed < self.settle_s:
                 return False
-            self._enter(PHASE_COLLECT, now)
+            self._enter(PHASE_PURSUIT if self._track is not None else PHASE_COLLECT, now)
+            return True
+        if self._phase == PHASE_PURSUIT:
+            if elapsed < self.pursuit_s:
+                return False
+            assert self._track is not None
+            self._track += 1
+            if self._track >= len(self._tracks):
+                self._enter(PHASE_DONE, now)
+                self._events.append(EVENT_FINISHED)
+                return False
+            self._enter(PHASE_SETTLE, now)
+            self._events.append(EVENT_TARGET)
             return True
         if self._phase != PHASE_COLLECT or elapsed < self.collect_s:
             return False
@@ -421,6 +550,11 @@ class CalibrationCollector:
         self._retries = 0
         self._index += 1
         if self._index >= len(self._plan):
+            if self._tracks:
+                self._track = 0
+                self._enter(PHASE_SETTLE, now)
+                self._events.append(EVENT_TARGET)
+                return True
             self._enter(PHASE_DONE, now)
             self._events.append(EVENT_FINISHED)
             return False
@@ -796,7 +930,7 @@ def evaluate_poses(
 
 
 def _mean_pose_error(report: CalibrationReport) -> float:
-    errors = [v for k, v in report.per_pose_error_px.items() if k > 0]
+    errors = [v for k, v in report.per_pose_error_px.items() if 0 < k < PURSUIT_POSE]
     return float(np.mean(errors)) if errors else math.inf
 
 
@@ -819,8 +953,9 @@ def pose_regression(
         return None
     if after > POSE_REGRESSION * before:
         return before, after
-    old_poses = [v for k, v in old.per_pose_error_px.items() if k > 0]
-    new_poses = [v for k, v in report.per_pose_error_px.items() if k > 0]
+    # The moving dot is not a head position: it never decides a pose series.
+    old_poses = [v for k, v in old.per_pose_error_px.items() if 0 < k < PURSUIT_POSE]
+    new_poses = [v for k, v in report.per_pose_error_px.items() if 0 < k < PURSUIT_POSE]
     if old_poses and new_poses:
         before, after = float(np.mean(old_poses)), float(np.mean(new_poses))
         if after > POSE_REGRESSION * before:
@@ -1099,7 +1234,7 @@ def evaluate(
         median_error_px=float(np.median(finite)) if finite.size else math.nan,
         per_monitor_accuracy=dict(sorted(per_monitor.items())),
         n_samples=len(usable),
-        n_points=int(np.unique(point_ids).shape[0]),
+        n_points=int(np.unique(point_ids[poses != PURSUIT_POSE]).shape[0]),
         alpha=selection.alpha,
         grade=grade,
         degree=selection.degree,
