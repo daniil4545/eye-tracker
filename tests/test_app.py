@@ -17,7 +17,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QTimer
@@ -1133,43 +1132,3 @@ def test_the_instance_lock_is_released_when_startup_raises(
     assert lock.acquire()
     assert lock.is_held
     lock.release()
-
-
-def test_head_poses_need_a_calibration(build: Callable[..., Harness], qapp: QApplication) -> None:
-    h = build(monitors=TWO_MONITORS)
-    h.tray.open_pose_calibration.emit()
-    settle(qapp)
-    assert h.app.calibration_window is None  # nothing to add the positions to
-
-
-def test_a_saved_calibration_offers_the_head_poses(
-    build: Callable[..., Harness], qapp: QApplication, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    h = build(monitors=TWO_MONITORS)
-    shown: list[tuple[str, str]] = []
-
-    def notify(title: str, message: str, **kwargs: Any) -> bool:
-        shown.append((title, message))
-        return True
-
-    monkeypatch.setattr(h.tray, "notify", notify)
-    window = Mock()
-    h.app._on_calibration_finished(window, "tray", True)
-    assert shown == []  # the backend does not measure the head position
-    monkeypatch.setattr(
-        h.controller, "head_feature_indices", lambda: {"roll": 2, "tx": 3, "ty": 4, "tz": 5}
-    )
-    h.app._on_calibration_finished(window, "poses", True)
-    assert shown == []  # the poses themselves do not ask again
-    h.app._on_calibration_finished(window, "tray", True)
-    assert [title for title, _ in shown] == ["Calibration saved"]
-
-    opened: list[tuple[str, bool]] = []
-    monkeypatch.setattr(
-        h.app,
-        "open_calibration",
-        lambda reason="user", *, poses=False: opened.append((reason, poses)),
-    )
-    monkeypatch.setattr(type(h.controller), "is_calibrated", property(lambda self: True))
-    h.tray.tray.messageClicked.emit()
-    assert opened == [("poses", True)]

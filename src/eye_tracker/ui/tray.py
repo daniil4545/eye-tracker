@@ -143,7 +143,6 @@ class TrayIcon(QObject):
 
     open_settings = Signal()
     open_calibration = Signal()
-    open_pose_calibration = Signal()
     open_preview = Signal()
     open_about = Signal()
     open_update = Signal()
@@ -345,10 +344,6 @@ class TrayIcon(QObject):
         self.action_privacy = self._add_action("Privacy mode", self._on_privacy, checkable=True)
         menu.addSeparator()
         self.action_calibrate = self._add_action("Calibrate…", self._on_calibrate)
-        self.action_poses = self._add_action("Calibrate head poses…", self._on_poses)
-        self.action_poses.setToolTip(
-            "Add head positions (left, right, closer, lower…) to your calibration"
-        )
         self.action_overlay = self._add_action("Show gaze dot", self._on_overlay, checkable=True)
         self.action_overlay.setToolTip("Draw a dot where the tracker thinks you are looking")
         self.action_panes = self._add_action("Follow split panes", self._on_panes, checkable=True)
@@ -410,7 +405,6 @@ class TrayIcon(QObject):
         font.setBold(needs)
         self.action_calibrate.setFont(font)
         self.action_calibrate.setEnabled(not busy)
-        self.action_poses.setEnabled(not busy and not needs)
         self.action_overlay.setChecked(self._settings.ui.show_gaze_overlay)
         self.action_panes.setChecked(self._settings.panes.enabled)
         self.action_windows.setChecked(self._settings.windows.enabled)
@@ -657,9 +651,6 @@ class TrayIcon(QObject):
 
     def _on_calibrate(self) -> None:
         self.open_calibration.emit()
-
-    def _on_poses(self) -> None:
-        self.open_pose_calibration.emit()
 
     def _on_preview(self) -> None:
         self.open_preview.emit()

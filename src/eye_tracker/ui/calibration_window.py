@@ -47,7 +47,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -77,44 +77,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import paths
 from ..config import Settings
 from ..gaze.calibration import (
     EVENT_FINISHED,
-    EVENT_POSE,
     EVENT_RETRY,
     EVENT_TARGET,
     PHASE_SETTLE,
-    PHASE_WAIT,
-    POSE_MIN_ACCEPTED,
-    POSE_POINTS,
-    POSES,
-    PURSUIT_POSE,
     CalibrationCollector,
     CalibrationReport,
     CalibrationSample,
     CalibrationTarget,
-    PoseSeries,
-    PoseSpec,
-    balance_pose_weights,
+    balance_pursuit_weights,
     evaluate,
-    evaluate_poses,
     make_plan,
     make_pursuit,
-    merge_poses,
-    pose_regression,
 )
-from ..gaze.learning import refit_model
 from ..gaze.model import GazeModel, gaze_feature_indices
-from ..gaze.store import CalibrationData, save_samples, utc_now_iso
+from ..gaze.store import CalibrationData
 from ..types import Monitor, Observation, layout_signature
 from . import util
 from .util import screen_for_monitor, ui_scale
 
 log = logging.getLogger(__name__)
-
-#: Samples of the last rejected pose run, beside calibration.json.
-REJECTED_POSES_FILE = "rejected-poses.json"
 
 __all__ = [
     "IDLE_TIMEOUT_S",
@@ -150,9 +134,6 @@ NO_CAMERA_S = 2.0
 IDLE_TIMEOUT_S = 120.0
 #: Close the calibration after the dots were paused this long for lack of a face.
 NO_FACE_TIMEOUT_S = 60.0
-
-#: Seconds without a face after which the head position being taken is given up.
-POSE_NO_FACE_S = 20.0
 
 TICK_MS = 30  # animation / collector tick while running
 IDLE_TICK_MS = 250  # intro: only the face indicator needs refreshing
@@ -947,8 +928,7 @@ class CalibrationWindow(QObject):
         settle_s, collect_s, min_samples, max_retries: Collector timing, see
             :class:`~eye_tracker.gaze.calibration.CalibrationCollector`.
         margin: Distance of the outer dots from the screen edges (fraction).
-        pursuit_s: Seconds of the moving dot per monitor after the dots (0: none;
-            the head-pose mode never shows it).
+        pursuit_s: Seconds of the moving dot per monitor after the dots (0: none).
         fit_in_thread: Fit the model on a background thread (default) instead
             of synchronously on the next tick.
 
@@ -975,18 +955,10 @@ class CalibrationWindow(QObject):
         max_retries: int = 1,
         margin: float = 0.1,
         fit_in_thread: bool = True,
-        poses: bool = False,
         pursuit_s: float = 0.0,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
-        #: Head-pose mode: the dots are shown in several head positions and added to
-        #: the calibration in use (``_profile``) instead of making a new one.
-        self._poses = poses
-        self._profile: CalibrationData | None = None
-        self._head: dict[str, int] = {}
-        self._series: PoseSeries | None = None
-        self._pose_skip_at = -math.inf
         self._clock = clock
         self._points_per_monitor = points_per_monitor
         self._timing = (settle_s, collect_s, min_samples, max_retries)
@@ -1000,7 +972,7 @@ class CalibrationWindow(QObject):
         self._monitors: list[Monitor] = []
         self._labels: dict[int, str] = {}
         self._surfaces: list[_Surface] = []
-        self._collector: CalibrationCollector | PoseSeries | None = None
+        self._collector: CalibrationCollector | None = None
         self._plan: list[CalibrationTarget] = []
         self._model: GazeModel | None = None
         self._report: CalibrationReport | None = None
@@ -1071,11 +1043,6 @@ class CalibrationWindow(QObject):
         return self._collector.current if self._collector is not None else None
 
     @property
-    def current_pose(self) -> PoseSpec | None:
-        """The head position being taken (head-pose mode only)."""
-        return self._series.pose if self._series is not None else None
-
-    @property
     def progress(self) -> float:
         return self._collector.progress if self._collector is not None else 0.0
 
@@ -1113,10 +1080,6 @@ class CalibrationWindow(QObject):
             self._state = STATE_CLOSED
             self.finished.emit(False)
             return False
-        if self._poses and not self._take_profile(monitors):
-            self._state = STATE_CLOSED
-            self.finished.emit(False)
-            return False
         self._monitors = monitors
         self._labels = _monitor_labels(monitors)
         primary = next((m for m in monitors if m.primary), monitors[0])
@@ -1144,24 +1107,6 @@ class CalibrationWindow(QObject):
         self._watchdog.start()
         return True
 
-    def _take_profile(self, monitors: list[Monitor]) -> bool:
-        """Head-pose mode: fetch the calibration to add to; tell the user when there is none."""
-        try:
-            profile = self._controller.calibration_for_poses()  # type: ignore[attr-defined]
-            head = self._controller.head_feature_indices()  # type: ignore[attr-defined]
-        except Exception:
-            log.exception("The controller could not provide the calibration for head poses")
-            profile, head = None, None
-        if profile is None or not head or profile.layout_signature != layout_signature(monitors):
-            self._notify(
-                "Head positions",
-                "Calibrate first (tray menu: Calibrate…), then add the head positions. "
-                "They need a camera that measures the head position.",
-            )
-            return False
-        self._profile, self._head = profile, dict(head)
-        return True
-
     def show(self) -> bool:
         """Alias of :meth:`start`."""
         return self.start()
@@ -1177,32 +1122,17 @@ class CalibrationWindow(QObject):
             self._on_screens_changed()
             return
         settle_s, collect_s, min_samples, max_retries = self._timing
-        if self._poses and self._profile is not None:
-            self._series = PoseSeries(
-                self._monitors,
-                self._profile.samples,
-                self._head,
-                settle_s=settle_s,
-                collect_s=collect_s,
-                min_samples=min_samples,
-                max_retries=max_retries,
-                margin=self._margin,
-            )
-            self._plan = list(self._series.plan)
-            self._collector = self._series
-        else:
-            self._plan = make_plan(self._monitors, self._points_per_monitor, self._margin)
-            self._collector = CalibrationCollector(
-                self._plan,
-                settle_s=settle_s,
-                collect_s=collect_s,
-                min_samples=min_samples,
-                max_retries=max_retries,
-                pursuit=make_pursuit(self._monitors, self._margin),
-                pursuit_s=self._pursuit_s,
-            )
+        self._plan = make_plan(self._monitors, self._points_per_monitor, self._margin)
+        self._collector = CalibrationCollector(
+            self._plan,
+            settle_s=settle_s,
+            collect_s=collect_s,
+            min_samples=min_samples,
+            max_retries=max_retries,
+            pursuit=make_pursuit(self._monitors, self._margin),
+            pursuit_s=self._pursuit_s,
+        )
         now = self._clock()
-        self._pose_skip_at = -math.inf
         self._last_input_at = now
         self._no_face_since = None
         self._prev_target = self._last_target = None
@@ -1256,45 +1186,24 @@ class CalibrationWindow(QObject):
             # Without them the calibration could never be matched to the backend later.
             self._show_error("The vision backend is not ready. Please try again.")
             return False
-        if self._series is not None and self._profile is not None:
-            data = self._pose_data(self._profile, self._model, self._report)
-        else:
-            data = CalibrationData(
-                backend=str(backend),
-                feature_version=str(feature_version),
-                layout_signature=layout_signature(self._monitors),
-                monitors=list(self._monitors),
-                samples=self._fit_samples(),
-                implicit_samples=[],
-                model=self._model,
-                report=self._report.to_dict(),
-                # The calibration only fits the camera it was recorded with (its
-                # position and field of view shape every feature).
-                camera=self._camera_device(),
-                frame_size=collector.frame_size,
-            )
+        data = CalibrationData(
+            backend=str(backend),
+            feature_version=str(feature_version),
+            layout_signature=layout_signature(self._monitors),
+            monitors=list(self._monitors),
+            samples=self._fit_samples(),
+            implicit_samples=[],
+            model=self._model,
+            report=self._report.to_dict(),
+            # The calibration only fits the camera it was recorded with (its
+            # position and field of view shape every feature).
+            camera=self._camera_device(),
+            frame_size=collector.frame_size,
+        )
         self._data = data
         log.info("Calibration saved: %s", self._report.summary())
         self._finish(data)
         return True
-
-    def _pose_data(
-        self, profile: CalibrationData, model: GazeModel, report: CalibrationReport
-    ) -> CalibrationData:
-        """``profile`` with the positions taken added; its learned samples stay and
-        count in the model, as they did before."""
-        assert self._series is not None
-        samples = balance_pose_weights(merge_poses(profile.samples, self._series.samples))
-        if profile.implicit_samples:
-            model = refit_model(samples, profile.implicit_samples, model, monitors=self._monitors)
-        return replace(
-            profile,
-            samples=samples,
-            implicit_samples=list(profile.implicit_samples),
-            model=model,
-            report=report.to_dict(),
-            created_at=utc_now_iso(),
-        )
 
     def cancel(self) -> None:
         """Close without saving (Esc)."""
@@ -1424,13 +1333,6 @@ class CalibrationWindow(QObject):
             log.debug("Calibration %s", "paused: no face" if face_missing else "resumed")
             self._update_pause(now)
         events = collector.update(self._collector_time(now))
-        series = self._series
-        if series is not None and self._no_face_since is not None:
-            since = max(self._no_face_since, self._pose_skip_at)
-            if now - since >= POSE_NO_FACE_S:
-                self._pose_skip_at = now
-                log.info("Head position given up: no face for %g s", POSE_NO_FACE_S)
-                events += series.skip_pose(self._collector_time(now))
         for event in events:
             if event == EVENT_TARGET:
                 self._prev_target = self._last_target
@@ -1438,9 +1340,6 @@ class CalibrationWindow(QObject):
                 self._retrying = False
             elif event == EVENT_RETRY:
                 self._retrying = True
-            elif event == EVENT_POSE:
-                self._prev_target = self._last_target = None
-                self._retrying = False
             elif event == EVENT_FINISHED:
                 self._enter_fitting()
                 return
@@ -1473,13 +1372,6 @@ class CalibrationWindow(QObject):
             return "Keep looking at the dot…", _WARNING
         if self._in_pursuit():
             return "Follow the dot with your eyes · you may move your head", _TEXT
-        series = self._series
-        if series is not None and series.pose is not None:
-            if series.phase == PHASE_WAIT:
-                if series.asked_again:
-                    return f"{series.pose.prompt}, a little more", _WARNING
-                return series.pose.prompt, _TEXT
-            return "Keep your head in this position", _MUTED
         return "", _MUTED
 
     def _dot_state(self) -> _DotState | None:
@@ -1523,17 +1415,9 @@ class CalibrationWindow(QObject):
             text = (
                 f"Moving dot · screen {collector.pursuit_track + 1} of {collector.pursuit_tracks}"
             )
-        series = self._series
-        if series is not None:
-            per_pose = max(1, total // len(POSES))
-            text = f"Head position {series.pose_number} of {len(POSES)}"
-            if target is not None:
-                text += f" · dot {collector.current_index % per_pose + 1} of {per_pose}"
         keys = "Space  pause    ·    R  restart    ·    Esc  cancel"
         for surface in self._surfaces:
             active = target is not None and surface.monitor.index == target.monitor_index
-            if target is None and series is not None:
-                active = surface is self._surfaces[0]  # the prompt is shown on the main screen
             surface.set_running(
                 dot,
                 active=active,
@@ -1559,10 +1443,6 @@ class CalibrationWindow(QObject):
             else:
                 card.add_label("Almost done…", muted=True)
             surface.place_card()
-        problem = self._pose_problem()
-        if problem:
-            self._show_error(problem, badge="Head positions")
-            return
         samples = self._fit_samples()
         self._nonlinear = _fit_features(controller_gaze_features(self._controller), samples)
         if self._fit_in_thread:
@@ -1572,37 +1452,15 @@ class CalibrationWindow(QObject):
         self._timer.start(TICK_MS)
 
     def _fit_samples(self) -> list[CalibrationSample]:
-        """What the model is fitted on: the dots shown, or in head-pose mode the
-        profile's samples with the positions just taken."""
-        if self._series is not None and self._profile is not None:
-            return balance_pose_weights(merge_poses(self._profile.samples, self._series.samples))
+        """What the model is fitted on: the dots shown and the moving dot."""
         collector = self._collector
         # The many moving-dot frames together weigh as much as the dots.
-        return balance_pose_weights(collector.samples) if collector is not None else []
+        return balance_pursuit_weights(collector.samples) if collector is not None else []
 
     def _fit(self, samples: Sequence[CalibrationSample]) -> Callable[[], FitResult]:
-        """The fit to run: head positions are fitted two ways, the better one kept."""
+        """The fit to run on a copy of the samples (it may run on a thread)."""
         samples, monitors, nonlinear = list(samples), list(self._monitors), self._nonlinear
-        profile = self._profile
-        if self._series is not None and profile is not None:
-            old = dict(profile.report)
-            return lambda: evaluate_poses(samples, monitors, old, nonlinear=nonlinear)
         return lambda: evaluate(samples, monitors, nonlinear=nonlinear)
-
-    def _pose_problem(self) -> str:
-        """Why the head positions just taken cannot be added ("" when they can)."""
-        series, profile = self._series, self._profile
-        if series is None or profile is None:
-            return ""
-        if len(series.accepted) < POSE_MIN_ACCEPTED:
-            return (
-                f"Fewer than {POSE_MIN_ACCEPTED} head positions were taken. "
-                "Move your head further when asked, with your face in view of the camera."
-            )
-        ok, reason = profile.camera_matches(self._camera_device(), series.frame_size)
-        if not ok:
-            return f"{reason.capitalize()}. Run the full calibration (Calibrate…) instead."
-        return ""
 
     def _tick_fitting(self) -> None:
         now = self._clock()
@@ -1630,32 +1488,10 @@ class CalibrationWindow(QObject):
 
     def _fit_succeeded(self, model: GazeModel, report: CalibrationReport) -> None:
         self._timer.stop()
-        if self._profile is not None and self._series is not None:
-            worse = pose_regression(self._profile.report, report)
-            if worse is not None:
-                log.info("Head positions rejected: usual position %.0f -> %.0f px", *worse)
-                self._keep_rejected_run()
-                self._show_error(
-                    f"With these positions your calibration gets worse (median error "
-                    f"{worse[1]:.0f} px, was {worse[0]:.0f} px). "
-                    "Your calibration was not changed.",
-                    badge="Calibration kept",
-                )
-                return
         self._model, self._report = model, report
         self._last_input_at = self._clock()  # the idle timeout counts from the result
         self._set_state(STATE_RESULT)
         self._show_result(report)
-
-    def _keep_rejected_run(self) -> None:
-        """Keep the samples of a rejected pose run for offline analysis (numbers only)."""
-        path = paths.data_dir() / REJECTED_POSES_FILE
-        try:
-            save_samples(self._fit_samples(), path)
-        except OSError as exc:
-            log.warning("Could not keep the rejected head positions: %s", exc)
-        else:
-            log.info("Rejected head positions kept in %s", path)
 
     def _fit_failed(self, error: BaseException) -> None:
         collector = self._collector
@@ -1684,9 +1520,6 @@ class CalibrationWindow(QObject):
 
     # ============================================================== screens
     def _show_intro(self) -> None:
-        if self._poses:
-            self._show_pose_intro()
-            return
         n_points = self._points_per_monitor * len(self._monitors)
         settle_s, collect_s, _, _ = self._timing
         pursuit_s = len(self._monitors) * (settle_s + self._pursuit_s) if self._pursuit_s else 0.0
@@ -1708,30 +1541,6 @@ class CalibrationWindow(QObject):
             card.add_label(
                 f"{n_points} dots on {'one' if len(self._monitors) == 1 else 'your'} {screens}"
                 f"{' and a moving dot' if self._pursuit_s else ''} · about {seconds} seconds",
-                muted=True,
-            )
-            card.add_spacing(6)
-            card.add_label("", name="face", size=10.5)
-            card.add_spacing(4)
-            card.add_keys([("Space", "start"), ("Esc", "cancel")])
-            surface.place_card()
-        self._refresh_face_chip()
-
-    def _show_pose_intro(self) -> None:
-        settle_s, collect_s, _, _ = self._timing
-        dots = POSE_POINTS * len(self._monitors)
-        seconds = round(len(POSES) * (dots * (settle_s + collect_s) + 8) / 10) * 10
-        for surface in self._surfaces:
-            card = surface.show_card()
-            card.clear()
-            card.add_label("Calibrate your head positions", size=22.0, bold=True)
-            card.add_label(
-                "Move your head as asked, then look at the dots, the way you work.",
-                size=13.0,
-            )
-            card.add_label(
-                f"{len(POSES)} head positions · about {seconds} seconds. "
-                "They are added to your calibration.",
                 muted=True,
             )
             card.add_spacing(6)
@@ -1796,8 +1605,6 @@ class CalibrationWindow(QObject):
             if skipped:
                 details += f" · {skipped} skipped"
             card.add_label(details, name="details", muted=True, size=10.0)
-            if self._series is not None:
-                card.add_label(self._pose_summary(report), name="poses", muted=True, size=10.0)
             uncovered = self._uncovered_labels(report)
             if uncovered:
                 # Every dot of these screens was skipped: switching to them cannot work.
@@ -1832,22 +1639,6 @@ class CalibrationWindow(QObject):
             )
             surface.place_card()
         self._focus_primary()
-
-    def _pose_summary(self, report: CalibrationReport) -> str:
-        """One line per head position: its error, and the error if it had not been taken."""
-        names = {0: "Usual position", **{n + 1: p.name.capitalize() for n, p in enumerate(POSES)}}
-        names[PURSUIT_POSE] = "Moving dot"
-        lines = []
-        for pose, error in sorted(report.per_pose_error_px.items()):
-            line = f"{names.get(pose, f'Position {pose}')}: {error:.0f} px"
-            unseen = report.unseen_pose_error_px.get(pose)
-            if unseen is not None and pose > 0:
-                line += f" (without it: {unseen:.0f} px)"
-            lines.append(line)
-        series = self._series
-        if series is not None and series.skipped_poses:
-            lines.append("Not taken: " + ", ".join(series.skipped_poses))
-        return "\n".join(lines)
 
     def _uncovered_labels(self, report: CalibrationReport) -> list[str]:
         """Labels of the monitors the report has no dots for, left to right."""

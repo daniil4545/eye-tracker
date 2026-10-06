@@ -111,10 +111,6 @@ class FakeController(QObject):
         #: What gaze_feature_indices() reports: the synthetic observations below
         #: encode the dot's position in features 0 and 1.
         self.gaze_indices: tuple[int, ...] | None = (0, 1)
-        #: The calibration the head poses are added to (None: none usable) and the
-        #: head feature positions the backend reports.
-        self.profile: CalibrationData | None = None
-        self.head_indices: dict[str, int] | None = None
         self.notify.connect(lambda title, text: self.notifications.append((title, text)))
 
     @property
@@ -137,12 +133,6 @@ class FakeController(QObject):
 
     def calibration(self) -> CalibrationData | None:
         return None
-
-    def calibration_for_poses(self) -> CalibrationData | None:
-        return self.profile
-
-    def head_feature_indices(self) -> dict[str, int] | None:
-        return self.head_indices
 
     def begin_calibration(self) -> None:
         self.begun += 1

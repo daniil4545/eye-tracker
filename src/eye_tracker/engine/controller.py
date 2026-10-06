@@ -1100,21 +1100,6 @@ class Controller(QObject):
         setup (then it is not usable; see :attr:`calibration_reason`)."""
         return self._calibration
 
-    def calibration_for_poses(self) -> CalibrationData | None:
-        """The usable calibration the head poses are added to, learned samples
-        included; ``None`` when there is none for the current setup."""
-        if self._calibration is None or self._model is None:
-            return None
-        self._flush_learned()
-        return self._calibration
-
-    def head_feature_indices(self) -> dict[str, int] | None:
-        """Positions of ``roll``, ``tx``, ``ty``, ``tz`` in the features of the backend
-        in use; ``None`` when it does not measure the head position (``lite``)."""
-        info = self._current_backend()
-        indices = _named_backend_head_indices(info[0]) if info is not None else ()
-        return dict(zip(_HEAD_FEATURES, indices, strict=True)) if indices else None
-
     def calibrations(self) -> list[CalibrationData]:
         """Every saved calibration profile, most recently used first."""
         return self._library.profiles

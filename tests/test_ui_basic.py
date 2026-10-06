@@ -505,7 +505,6 @@ def test_tray_menu_layout(controller: FakeController, cleanup: list[Any]) -> Non
         "Pause tracking",
         "Privacy mode",
         "Calibrate…",
-        "Calibrate head poses…",
         "Show gaze dot",
         "Follow split panes",
         "Follow windows",

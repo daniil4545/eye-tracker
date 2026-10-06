@@ -97,7 +97,6 @@ PROMPT_CLICK_WINDOW_S = 600.0
 #: the setup assistant, the OS privacy settings of a missing permission, or the
 #: update window.
 PROMPT_CALIBRATE = "calibrate"
-PROMPT_POSES = "poses"
 PROMPT_SETUP = "setup"
 PROMPT_PERMISSION = "permission"
 PROMPT_UPDATE = "update"
@@ -519,7 +518,6 @@ class EyeTrackerApp(QObject):
 
         tray.open_settings.connect(self.open_settings)
         tray.open_calibration.connect(self._on_tray_calibrate)
-        tray.open_pose_calibration.connect(self._on_tray_poses)
         tray.open_preview.connect(self.open_preview)
         tray.open_about.connect(self.open_about)
         tray.open_update.connect(self.open_update)
@@ -642,10 +640,8 @@ class EyeTrackerApp(QObject):
             self._settings_dialog = dialog
         _present(dialog)
 
-    def open_calibration(self, reason: str = "user", *, poses: bool = False) -> None:
-        """Open the calibration on every monitor, or raise it if it is already open.
-
-        ``poses``: add head positions to the calibration in use instead."""
+    def open_calibration(self, reason: str = "user") -> None:
+        """Open the calibration on every monitor, or raise it if it is already open."""
         if self._closed or self._controller is None:
             return
         window = self._calibration
@@ -657,9 +653,7 @@ class EyeTrackerApp(QObject):
 
         log.info("Opening the calibration (%s)", reason)
         self._prompt = None
-        window = CalibrationWindow(
-            self._controller, self, poses=poses, pursuit_s=0.0 if poses else PURSUIT_S
-        )
+        window = CalibrationWindow(self._controller, self, pursuit_s=PURSUIT_S)
         window.finished.connect(functools.partial(self._on_calibration_finished, window, reason))
         # Assigned before start(): start() emits finished(False) at once when
         # there is no monitor, and the slot clears this reference.
@@ -752,9 +746,6 @@ class EyeTrackerApp(QObject):
     def _on_tray_calibrate(self) -> None:
         self.open_calibration("tray")
 
-    def _on_tray_poses(self) -> None:
-        self.open_calibration("poses", poses=True)
-
     def _on_settings_calibrate(self) -> None:
         self.open_calibration("settings")
 
@@ -773,8 +764,6 @@ class EyeTrackerApp(QObject):
         window.deleteLater()
         log.info("Calibration %s", "saved" if saved else "closed without saving")
         controller = self._controller
-        if saved and reason != "poses" and controller is not None:
-            self._suggest_poses(controller)
         if not saved and reason in _OFFERED_CALIBRATIONS and controller is not None:
             # Offered rather than asked for (setup assistant, --calibrate): whoever
             # put it off learns what that means, and that a click brings it back.
@@ -909,8 +898,6 @@ class EyeTrackerApp(QObject):
             self.open_wizard()
         elif kind == PROMPT_CALIBRATE and not controller.is_calibrated:
             self.open_calibration("notification")
-        elif kind == PROMPT_POSES and controller.is_calibrated:
-            self.open_calibration("poses", poses=True)
         elif kind == PROMPT_PERMISSION and permission:
             self._open_permission_settings(permission)
         elif kind == PROMPT_UPDATE:
@@ -975,19 +962,6 @@ class EyeTrackerApp(QObject):
         tray.menu.popup(point if point is not None else QCursor.pos())
         tray.menu.activateWindow()
         return True
-
-    def _suggest_poses(self, controller: Controller) -> None:
-        """After a full calibration: offer the head positions (the camera must measure them)."""
-        tray = self._tray
-        if tray is None or controller.head_feature_indices() is None:
-            return
-        shown = tray.notify(
-            "Calibration saved",
-            "A small move of your head can still throw it off. Click here or choose "
-            "“Calibrate head poses…” in the tray menu to add your usual head positions.",
-        )
-        if shown:
-            self._prompt = (PROMPT_POSES, self._clock())
 
     def _suggest_calibration(self, reason: str) -> None:
         """Tell the user that switching needs a calibration.
