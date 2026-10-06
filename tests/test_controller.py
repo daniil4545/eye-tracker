@@ -3613,3 +3613,43 @@ def test_trace_records_window_decisions(
     fired = next(r for r in rows if r.get("win_reason") == "switch")
     assert fired["win_target"] == 2
     assert "title" not in json.dumps(fired)
+
+
+# ------------------------------------------------------------------ head-pose calibration
+def test_calibration_for_poses_hands_over_the_learned_samples(
+    make_controller: Callable[..., Harness],
+) -> None:
+    h = make_controller()
+    h.tick()
+    for i in range(25):
+        point = (300 + 40 * i, 400)
+        h.cursor.position = point
+        h.tick()
+        h.push(gaze_obs(point), dt=0.4)
+    cal = h.controller.calibration_for_poses()
+    assert cal is not None
+    assert len(cal.implicit_samples) == 25
+    merged = dataclasses.replace(
+        cal, samples=list(cal.samples), implicit_samples=cal.implicit_samples
+    )
+    h.controller.begin_calibration()
+    h.controller.finish_calibration(merged)
+    stored = load_calibration(paths.calibration_file())
+    assert stored is not None
+    assert len(stored.implicit_samples) == 25  # a pose run does not forget the mouse samples
+
+
+def test_calibration_for_poses_needs_a_usable_calibration(
+    make_controller: Callable[..., Harness],
+) -> None:
+    h = make_controller(calibrated=False)
+    assert h.controller.calibration_for_poses() is None
+
+
+def test_head_feature_indices_follow_the_backend(
+    make_controller: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = make_controller()
+    assert h.controller.head_feature_indices() is None  # the fake backend has no head pose
+    monkeypatch.setattr(controller_module, "_named_backend_head_indices", lambda name: (2, 3, 4, 5))
+    assert h.controller.head_feature_indices() == {"roll": 2, "tx": 3, "ty": 4, "tz": 5}

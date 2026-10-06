@@ -24,6 +24,7 @@ from eye_tracker.gaze.calibration import (
     PoseSpec,
     evaluate,
     make_plan,
+    merge_poses,
     place_groups,
     pose_of,
     pose_regression,
@@ -300,3 +301,17 @@ def test_a_worse_baseline_is_a_regression() -> None:
     assert pose_regression(again, _report_with(0, 130.0)) == (100.0, 130.0)
     assert pose_regression({"grade": "bad"}, _report_with(0, 500.0)) is None
     assert pose_regression(old, _report_with(0, math.nan)) is None
+
+
+def test_a_new_run_replaces_only_the_poses_it_took() -> None:
+    rng = np.random.default_rng(10)
+    old = calibration_samples(TWO, rng, per_point=1)
+    for pose in (1, 2, 5):
+        old += pose_samples(pose, (pose, 0, 0), rng, 1)
+    new = pose_samples(2, (-5.0, 0, 0), rng, 1) + pose_samples(3, (0, 5.0, 0), rng, 1)
+    merged = merge_poses(old, new)
+    poses = sorted({pose_of(s.point_id) for s in merged})
+    assert poses == [0, 1, 2, 3, 5]  # pose 5 was not taken this time and stays
+    kept = [s for s in merged if pose_of(s.point_id) == 2]
+    assert all(any(s is n for n in new) for s in kept)  # the old pose 2 is gone
+    assert len(merged) == len(old) - 10 + len(new)

@@ -752,6 +752,14 @@ class PoseSeries:
         return [s for s, ok in zip(samples, keep, strict=True) if ok]
 
 
+def merge_poses(
+    stored: Sequence[CalibrationSample], taken: Sequence[CalibrationSample]
+) -> list[CalibrationSample]:
+    """``stored`` with the poses of ``taken`` replaced; the poses it lacks stay."""
+    replaced = {pose_of(s.point_id) for s in taken}
+    return [s for s in stored if pose_of(s.point_id) not in replaced] + list(taken)
+
+
 def pose_regression(
     old_report: dict[str, Any], report: CalibrationReport
 ) -> tuple[float, float] | None:
