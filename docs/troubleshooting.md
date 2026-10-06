@@ -79,6 +79,23 @@ your last keystroke before it moves focus there. Increase that value if you paus
 position, so Eye Tracker cannot remember where you left it ([details](platform-support.md#wayland)).
 Elsewhere, check **Cursor lands** under Settings → Switching.
 
+## Window focus
+
+**Window focus does not pick the window I look at.** (macOS, [window focus](windows.md))
+
+- The window is too small. A window takes part only if its visible part is at least
+  *Only windows at least* (`windows.precision`, 2.5) times your gaze error wide or tall, and at
+  least `windows.min_window_px` (240 px). A window partly covered by another counts by what shows.
+  Lower the setting, or recalibrate for a smaller error.
+- Your head is outside the calibrated range, so window focus is paused. Sit where you calibrated,
+  or recalibrate and move your head during the moving dot. `windows.pause_off_range` sets the limit
+  (0 turns the pause off).
+- Accessibility was granted to an earlier build. Remove Eye Tracker from *System Settings →
+  Privacy & Security → Accessibility* with **−**, add it again and restart it
+  ([details](platform-support.md#macos)).
+- Window focus waits after you type, after a switch and after the cursor moves to another monitor
+  (see the settings under `windows.*`). Monitor switching must be on, and a calibration must exist.
+
 ## Walk-away lock
 
 **It locked while I was sitting there.**
