@@ -22,6 +22,7 @@ from eye_tracker.gaze.calibration import (
     CalibrationSample,
     PoseSeries,
     PoseSpec,
+    balance_pose_weights,
     evaluate,
     make_plan,
     merge_poses,
@@ -290,6 +291,31 @@ def _report_with(median: float, base_error: float | None, **kw: object) -> Calib
         per_pose_error_px={} if base_error is None else {0: base_error},
         **kw,  # type: ignore[arg-type]
     )
+
+
+def test_worse_head_positions_are_a_regression() -> None:
+    old = CalibrationReport.to_dict(_report_with(200.0, 100.0))
+    old["per_pose_error_px"] = {"0": 100.0, "1": 300.0, "2": 500.0}  # mean 400
+    better = _report_with(0, 110.0)
+    better.per_pose_error_px.update({1: 350.0, 2: 450.0})
+    assert pose_regression(old, better) is None
+    worse = _report_with(0, 110.0)
+    worse.per_pose_error_px.update({1: 600.0, 2: 500.0})  # mean 550 > 1.2 x 400
+    assert pose_regression(old, worse) == (400.0, 550.0)
+
+
+def test_pose_samples_weigh_as_much_as_the_ordinary_dots() -> None:
+    features = np.zeros(2)
+    samples = [
+        CalibrationSample(features, 0.0, 0.0, 0, 1, 1.0),
+        CalibrationSample(features, 0.0, 0.0, 0, 2, 1.0),
+        *[CalibrationSample(features, 0.0, 0.0, 0, POSE_ID_STRIDE + i) for i in range(8)],
+        CalibrationSample(features, 0.0, 0.0, 0, -1, 0.5),  # learned from the mouse
+    ]
+    balanced = balance_pose_weights(samples)
+    assert sum(s.weight for s in balanced if pose_of(s.point_id) > 0) == pytest.approx(2.0)
+    assert [s.weight for s in balanced if pose_of(s.point_id) <= 0] == [1.0, 1.0, 0.5]
+    assert balance_pose_weights(samples[:2]) == samples[:2]  # no poses: unchanged
 
 
 def test_a_worse_baseline_is_a_regression() -> None:

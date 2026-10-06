@@ -56,6 +56,9 @@ def follow(spec: PoseSpec, waiting: bool) -> float:
     return (-2.0 if spec.opposite_of else 2.0) * spec.min_shift
 
 
+pytestmark = pytest.mark.usefixtures("app_dirs")  # a rejected run is written to disk
+
+
 @pytest.fixture
 def poses() -> Iterator[tuple[CalibrationWindow, FakeController, FakeClock]]:
     controller = FakeController()

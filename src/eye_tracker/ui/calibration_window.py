@@ -95,7 +95,9 @@ from ..gaze.calibration import (
     CalibrationTarget,
     PoseSeries,
     PoseSpec,
+    balance_pose_weights,
     evaluate,
+    evaluate_poses,
     make_plan,
     merge_poses,
     pose_regression,
@@ -289,11 +291,7 @@ def _fit_features(
     return indices
 
 
-def _start_fit(
-    samples: Sequence[CalibrationSample],
-    monitors: Sequence[Monitor],
-    nonlinear: tuple[int, ...] | None = None,
-) -> Future[FitResult]:
+def _start_fit(fit: Callable[[], FitResult]) -> Future[FitResult]:
     """Run :func:`evaluate` on a daemon thread; the returned future is polled by the UI.
 
     Polling (rather than a cross-thread signal) means the thread never touches a
@@ -301,13 +299,12 @@ def _start_fit(
     result is simply dropped.
     """
     future: Future[FitResult] = Future()
-    samples, monitors = list(samples), list(monitors)
 
     def run() -> None:
         if not future.set_running_or_notify_cancel():
             return
         try:
-            future.set_result(evaluate(samples, monitors, nonlinear=nonlinear))
+            future.set_result(fit())
         except BaseException as exc:  # delivered to the UI thread, never lost
             future.set_exception(exc)
 
@@ -1550,7 +1547,7 @@ class CalibrationWindow(QObject):
         samples = self._fit_samples()
         self._nonlinear = _fit_features(controller_gaze_features(self._controller), samples)
         if self._fit_in_thread:
-            self._fit_future = _start_fit(samples, self._monitors, self._nonlinear)
+            self._fit_future = _start_fit(self._fit(samples))
         # Without a thread the fit runs on the next tick, so the "Calculating"
         # screen is painted first; with one, ticks animate the spinner and poll.
         self._timer.start(TICK_MS)
@@ -1559,9 +1556,18 @@ class CalibrationWindow(QObject):
         """What the model is fitted on: the dots shown, or in head-pose mode the
         profile's samples with the positions just taken."""
         if self._series is not None and self._profile is not None:
-            return merge_poses(self._profile.samples, self._series.samples)
+            return balance_pose_weights(merge_poses(self._profile.samples, self._series.samples))
         collector = self._collector
         return collector.samples if collector is not None else []
+
+    def _fit(self, samples: Sequence[CalibrationSample]) -> Callable[[], FitResult]:
+        """The fit to run: head positions are fitted two ways, the better one kept."""
+        samples, monitors, nonlinear = list(samples), list(self._monitors), self._nonlinear
+        profile = self._profile
+        if self._series is not None and profile is not None:
+            old = dict(profile.report)
+            return lambda: evaluate_poses(samples, monitors, old, nonlinear=nonlinear)
+        return lambda: evaluate(samples, monitors, nonlinear=nonlinear)
 
     def _pose_problem(self) -> str:
         """Why the head positions just taken cannot be added ("" when they can)."""
@@ -1587,7 +1593,7 @@ class CalibrationWindow(QObject):
         if future is None:
             samples = self._fit_samples()
             try:
-                result = evaluate(samples, self._monitors, nonlinear=self._nonlinear)
+                result = self._fit(samples)()
             except Exception as exc:
                 self._fit_failed(exc)
             else:
@@ -1610,7 +1616,7 @@ class CalibrationWindow(QObject):
                 log.info("Head positions rejected: usual position %.0f -> %.0f px", *worse)
                 self._keep_rejected_run()
                 self._show_error(
-                    f"With these positions your usual position gets worse (median error "
+                    f"With these positions your calibration gets worse (median error "
                     f"{worse[1]:.0f} px, was {worse[0]:.0f} px). "
                     "Your calibration was not changed.",
                     badge="Calibration kept",

@@ -21,7 +21,7 @@ import logging
 import math
 from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -455,6 +455,9 @@ POSE_OUTLIER_CM = 6.0
 POSE_OUTLIER_DEG = 10.0
 #: New baseline error may grow by this factor before the old calibration is kept.
 POSE_REGRESSION = 1.2
+#: Polynomial degree tried for a calibration with head poses, every feature expanded:
+#: the iris x head terms hold the usual pose and the shifted ones together (issue #2).
+POSE_DEGREE = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -760,15 +763,51 @@ def merge_poses(
     return [s for s in stored if pose_of(s.point_id) not in replaced] + list(taken)
 
 
+def balance_pose_weights(samples: Sequence[CalibrationSample]) -> list[CalibrationSample]:
+    """Pose samples reweighted so that together they weigh as much as the ordinary
+    dots: without it the many pose samples outweigh the usual pose."""
+    base = sum(s.weight for s in samples if pose_of(s.point_id) == 0)
+    count = sum(1 for s in samples if pose_of(s.point_id) > 0)
+    if base <= 0 or count == 0:
+        return list(samples)
+    weight = base / count
+    return [replace(s, weight=weight) if pose_of(s.point_id) > 0 else s for s in samples]
+
+
+def evaluate_poses(
+    samples: Sequence[CalibrationSample],
+    monitors: Sequence[Monitor],
+    old_report: dict[str, Any],
+    *,
+    nonlinear: Sequence[int] | None = None,
+) -> tuple[GazeModel, CalibrationReport]:
+    """:func:`evaluate` for a calibration with head poses, fitted two ways: the usual
+    model, and :data:`POSE_DEGREE` over every feature (the better one on real data,
+    issue #2). Keeps the one that passes :func:`pose_regression` with the lower mean
+    error of the head positions; the second way when neither passes."""
+    candidates = [
+        evaluate(samples, monitors, POSE_DEGREE),
+        evaluate(samples, monitors, nonlinear=nonlinear),
+    ]
+    passing = [c for c in candidates if pose_regression(old_report, c[1]) is None]
+    if not passing:
+        return candidates[0]
+    return min(passing, key=lambda c: _mean_pose_error(c[1]))
+
+
+def _mean_pose_error(report: CalibrationReport) -> float:
+    errors = [v for k, v in report.per_pose_error_px.items() if k > 0]
+    return float(np.mean(errors)) if errors else math.inf
+
+
 def pose_regression(
     old_report: dict[str, Any], report: CalibrationReport
 ) -> tuple[float, float] | None:
-    """``(old, new)`` when the ordinary calibration got worse by more than
-    :data:`POSE_REGRESSION`, else ``None``.
+    """``(old, new)`` when the head positions make the calibration worse, else ``None``.
 
-    The two numbers are the median held-out error of the ordinary dots (pose 0):
-    the old report's ``per_pose_error_px[0]`` (``median_error_px`` for reports
-    without it) against the new report's.
+    Worse means the ordinary dots (pose 0) lost more than :data:`POSE_REGRESSION`
+    (old ``per_pose_error_px[0]``, or ``median_error_px`` for reports without it),
+    or the mean error of the head positions lost as much against an old report with them.
     """
     try:
         old = CalibrationReport.from_dict(old_report)
@@ -778,7 +817,15 @@ def pose_regression(
     after = report.per_pose_error_px.get(0, math.nan)
     if not (math.isfinite(before) and math.isfinite(after)) or before <= 0:
         return None
-    return (before, after) if after > POSE_REGRESSION * before else None
+    if after > POSE_REGRESSION * before:
+        return before, after
+    old_poses = [v for k, v in old.per_pose_error_px.items() if k > 0]
+    new_poses = [v for k, v in report.per_pose_error_px.items() if k > 0]
+    if old_poses and new_poses:
+        before, after = float(np.mean(old_poses)), float(np.mean(new_poses))
+        if after > POSE_REGRESSION * before:
+            return before, after
+    return None
 
 
 # ------------------------------------------------------------------ evaluation
